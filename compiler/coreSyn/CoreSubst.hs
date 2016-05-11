@@ -6,11 +6,12 @@
 Utility functions on @Core@ syntax
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 module CoreSubst (
         -- * Main data types
-        Subst(..), -- Implementation exported for supercompiler's Renaming.hs only
-        TvSubstEnv, IdSubstEnv, InScopeSet,
+        Subst,
+        SubstFor(..), -- Implementation exported for supercompiler's Renaming.hs only
+        TvSubstEnv, IdSubstEnvFor, IdSubstEnv, InScopeSet,
 
         -- ** Substituting into expressions and related types
         deShadowBinds, substSpec, substRulesForImportedIds,
@@ -33,7 +34,7 @@ module CoreSubst (
 
         -- ** Simple expression optimiser
         simpleOptPgm, simpleOptExpr, simpleOptExprWith,
-        exprIsConApp_maybe, exprIsLiteral_maybe, exprIsLambda_maybe,
+        exprIsConApp_maybe, exprIsConAppWith_maybe, exprIsLiteral_maybe, exprIsLambda_maybe,
     ) where
 
 #include "HsVersions.h"
@@ -107,12 +108,14 @@ import TysWiredIn
 -- * Arrange that it's the free vars of the range of the substitution
 --
 -- * Make it empty, if you know that all the free vars of the substitution are fresh, and hence can't possibly clash
-data Subst
-  = Subst InScopeSet  -- Variables in in scope (both Ids and TyVars) /after/
-                      -- applying the substitution
-          IdSubstEnv  -- Substitution for Ids
-          TvSubstEnv  -- Substitution from TyVars to Types
-          CvSubstEnv  -- Substitution from CoVars to Coercions
+type Subst = SubstFor CoreBndr
+
+data SubstFor b
+  = Subst InScopeSet         -- Variables in in scope (both Ids and TyVars) /after/
+                             -- applying the substitution
+          (IdSubstEnvFor b)  -- Substitution for Ids
+          TvSubstEnv         -- Substitution from TyVars to Types
+          CvSubstEnv         -- Substitution from CoVars to Coercions
 
         -- INVARIANT 1: See #in_scope_invariant#
         -- This is what lets us deal with name capture properly
@@ -180,53 +183,56 @@ TvSubstEnv and CvSubstEnv?
 -}
 
 -- | An environment for substituting for 'Id's
-type IdSubstEnv = IdEnv CoreExpr
+type IdSubstEnv = IdSubstEnvFor CoreBndr
+
+type IdSubstEnvFor b = IdEnv (Expr b)
 
 ----------------------------
-isEmptySubst :: Subst -> Bool
+isEmptySubst :: SubstFor b -> Bool
 isEmptySubst (Subst _ id_env tv_env cv_env)
   = isEmptyVarEnv id_env && isEmptyVarEnv tv_env && isEmptyVarEnv cv_env
 
-emptySubst :: Subst
+emptySubst :: SubstFor b
 emptySubst = Subst emptyInScopeSet emptyVarEnv emptyVarEnv emptyVarEnv
 
-mkEmptySubst :: InScopeSet -> Subst
+mkEmptySubst :: InScopeSet -> SubstFor b
 mkEmptySubst in_scope = Subst in_scope emptyVarEnv emptyVarEnv emptyVarEnv
 
-mkSubst :: InScopeSet -> TvSubstEnv -> CvSubstEnv -> IdSubstEnv -> Subst
+mkSubst :: InScopeSet -> TvSubstEnv -> CvSubstEnv -> IdSubstEnvFor b -> SubstFor b
 mkSubst in_scope tvs cvs ids = Subst in_scope ids tvs cvs
 
 -- | Find the in-scope set: see "CoreSubst#in_scope_invariant"
-substInScope :: Subst -> InScopeSet
+substInScope :: SubstFor b -> InScopeSet
 substInScope (Subst in_scope _ _ _) = in_scope
 
 -- | Remove all substitutions for 'Id's and 'Var's that might have been built up
 -- while preserving the in-scope set
-zapSubstEnv :: Subst -> Subst
+zapSubstEnv :: SubstFor b -> SubstFor b
 zapSubstEnv (Subst in_scope _ _ _) = Subst in_scope emptyVarEnv emptyVarEnv emptyVarEnv
 
 -- | Add a substitution for an 'Id' to the 'Subst': you must ensure that the in-scope set is
 -- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
-extendIdSubst :: Subst -> Id -> CoreExpr -> Subst
+extendIdSubst :: WrappedBndr b => SubstFor b -> b -> Expr b -> SubstFor b
 -- ToDo: add an ASSERT that fvs(subst-result) is already in the in-scope set
-extendIdSubst (Subst in_scope ids tvs cvs) v r = Subst in_scope (extendVarEnv ids v r) tvs cvs
+extendIdSubst (Subst in_scope ids tvs cvs) v r = Subst in_scope (extendVarEnv ids (unwrapBndr v) r) tvs cvs
 
 -- | Adds multiple 'Id' substitutions to the 'Subst': see also 'extendIdSubst'
-extendIdSubstList :: Subst -> [(Id, CoreExpr)] -> Subst
-extendIdSubstList (Subst in_scope ids tvs cvs) prs = Subst in_scope (extendVarEnvList ids prs) tvs cvs
+extendIdSubstList :: WrappedBndr b => SubstFor b -> [(b, Expr b)] -> SubstFor b
+extendIdSubstList (Subst in_scope ids tvs cvs) prs
+  = Subst in_scope (extendVarEnvList ids [(unwrapBndr id, rhs) | (id, rhs) <- prs]) tvs cvs
 
 -- | Add a substitution for a 'TyVar' to the 'Subst'
 -- The 'TyVar' *must* be a real TyVar, and not a CoVar
 -- You must ensure that the in-scope set is such that
 -- the "CoreSubst#in_scope_invariant" is true after extending
 -- the substitution like this.
-extendTvSubst :: Subst -> TyVar -> Type -> Subst
+extendTvSubst :: WrappedBndr b => SubstFor b -> b -> Type -> SubstFor b
 extendTvSubst (Subst in_scope ids tvs cvs) tv ty
-  = ASSERT( isTyVar tv )
-    Subst in_scope ids (extendVarEnv tvs tv ty) cvs
+  = ASSERT( isTyBndr tv )
+    Subst in_scope ids (extendVarEnv tvs (unwrapBndr tv) ty) cvs
 
 -- | Adds multiple 'TyVar' substitutions to the 'Subst': see also 'extendTvSubst'
-extendTvSubstList :: Subst -> [(TyVar,Type)] -> Subst
+extendTvSubstList :: WrappedBndr b => SubstFor b -> [(b,Type)] -> SubstFor b
 extendTvSubstList subst vrs
   = foldl' extend subst vrs
   where
@@ -234,36 +240,36 @@ extendTvSubstList subst vrs
 
 -- | Add a substitution from a 'CoVar' to a 'Coercion' to the 'Subst': you must ensure that the in-scope set is
 -- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
-extendCvSubst :: Subst -> CoVar -> Coercion -> Subst
+extendCvSubst :: WrappedBndr b => SubstFor b -> b -> Coercion -> SubstFor b
 extendCvSubst (Subst in_scope ids tvs cvs) v r
-  = ASSERT( isCoVar v )
-    Subst in_scope ids tvs (extendVarEnv cvs v r)
+  = ASSERT( isCoBndr v )
+    Subst in_scope ids tvs (extendVarEnv cvs (unwrapBndr v) r)
 
 -- | Add a substitution appropriate to the thing being substituted
 --   (whether an expression, type, or coercion). See also
 --   'extendIdSubst', 'extendTvSubst', 'extendCvSubst'
-extendSubst :: Subst -> Var -> CoreArg -> Subst
+extendSubst :: WrappedBndr b => SubstFor b -> b -> Arg b -> SubstFor b
 extendSubst subst var arg
   = case arg of
-      Type ty     -> ASSERT( isTyVar var ) extendTvSubst subst var ty
-      Coercion co -> ASSERT( isCoVar var ) extendCvSubst subst var co
-      _           -> ASSERT( isId    var ) extendIdSubst subst var arg
+      Type ty     -> ASSERT( isTyBndr var ) extendTvSubst subst var ty
+      Coercion co -> ASSERT( isCoBndr var ) extendCvSubst subst var co
+      _           -> ASSERT( isIdBndr var ) extendIdSubst subst var arg
 
-extendSubstWithVar :: Subst -> Var -> Var -> Subst
+extendSubstWithVar :: WrappedBndr b => SubstFor b -> b -> Var -> SubstFor b
 extendSubstWithVar subst v1 v2
-  | isTyVar v1 = ASSERT( isTyVar v2 ) extendTvSubst subst v1 (mkTyVarTy v2)
-  | isCoVar v1 = ASSERT( isCoVar v2 ) extendCvSubst subst v1 (mkCoVarCo v2)
-  | otherwise  = ASSERT( isId    v2 ) extendIdSubst subst v1 (Var v2)
+  | isTyBndr v1 = ASSERT( isTyVar v2 ) extendTvSubst subst v1 (mkTyVarTy v2)
+  | isCoBndr v1 = ASSERT( isCoVar v2 ) extendCvSubst subst v1 (mkCoVarCo v2)
+  | otherwise   = ASSERT( isId    v2 ) extendIdSubst subst v1 (Var v2)
 
 -- | Add a substitution as appropriate to each of the terms being
 --   substituted (whether expressions, types, or coercions). See also
 --   'extendSubst'.
-extendSubstList :: Subst -> [(Var,CoreArg)] -> Subst
+extendSubstList :: WrappedBndr b => SubstFor b -> [(b,Arg b)] -> SubstFor b
 extendSubstList subst []              = subst
 extendSubstList subst ((var,rhs):prs) = extendSubstList (extendSubst subst var rhs) prs
 
 -- | Find the substitution for an 'Id' in the 'Subst'
-lookupIdSubst :: SDoc -> Subst -> Id -> CoreExpr
+lookupIdSubst :: SDoc -> SubstFor b -> Id -> Expr b
 lookupIdSubst doc (Subst in_scope ids _ _) v
   | not (isLocalId v) = Var v
   | Just e  <- lookupVarEnv ids       v = e
@@ -274,70 +280,80 @@ lookupIdSubst doc (Subst in_scope ids _ _) v
                 Var v
 
 -- | Find the substitution for a 'TyVar' in the 'Subst'
-lookupTCvSubst :: Subst -> TyVar -> Type
+lookupTCvSubst :: SubstFor b -> TyVar -> Type
 lookupTCvSubst (Subst _ _ tvs cvs) v
   | isTyVar v
   = lookupVarEnv tvs v `orElse` Type.mkTyVarTy v
   | otherwise
   = mkCoercionTy $ lookupVarEnv cvs v `orElse` mkCoVarCo v
 
-delBndr :: Subst -> Var -> Subst
-delBndr (Subst in_scope ids tvs cvs) v
+delBndr :: WrappedBndr b => SubstFor b -> b -> SubstFor b
+delBndr (Subst in_scope ids tvs cvs) b
   | isCoVar v = Subst in_scope ids tvs (delVarEnv cvs v)
   | isTyVar v = Subst in_scope ids (delVarEnv tvs v) cvs
   | otherwise = Subst in_scope (delVarEnv ids v) tvs cvs
+  where
+    v = unwrapBndr b
 
-delBndrs :: Subst -> [Var] -> Subst
-delBndrs (Subst in_scope ids tvs cvs) vs
+delBndrs :: SubstFor b -> [Var] -> SubstFor b
+delBndrs (Subst in_scope ids tvs cvs) bs
   = Subst in_scope (delVarEnvList ids vs) (delVarEnvList tvs vs) (delVarEnvList cvs vs)
       -- Easiest thing is just delete all from all!
+  where
+    vs = unwrapBndrs bs
 
 -- | Simultaneously substitute for a bunch of variables
 --   No left-right shadowing
 --   ie the substitution for   (\x \y. e) a1 a2
 --      so neither x nor y scope over a1 a2
-mkOpenSubst :: InScopeSet -> [(Var,CoreArg)] -> Subst
+mkOpenSubst :: WrappedBndr b => InScopeSet -> [(b,Arg b)] -> SubstFor b
 mkOpenSubst in_scope pairs = Subst in_scope
-                                   (mkVarEnv [(id,e)  | (id, e) <- pairs, isId id])
-                                   (mkVarEnv [(tv,ty) | (tv, Type ty) <- pairs])
-                                   (mkVarEnv [(v,co)  | (v, Coercion co) <- pairs])
+                                   (mkVarEnv [(unwrapBndr id,e)  | (id, e) <- pairs, isIdBndr id])
+                                   (mkVarEnv [(unwrapBndr tv,ty) | (tv, Type ty) <- pairs])
+                                   (mkVarEnv [(unwrapBndr v,co)  | (v, Coercion co) <- pairs])
+
+unwrapBndrsInSubst :: WrappedBndr b => SubstFor b -> Subst
+unwrapBndrsInSubst (Subst ins ids tvs cvs)
+  = Subst ins (mapVarEnv unwrapBndrsInExpr ids) tvs cvs
+
+{-# RULES "unwrapBndrsInSubst/CoreBndr" unwrapBndrsInSubst = id #-}
 
 ------------------------------
-isInScope :: Var -> Subst -> Bool
+isInScope :: Var -> SubstFor b -> Bool
 isInScope v (Subst in_scope _ _ _) = v `elemInScopeSet` in_scope
 
 -- | Add the 'Var' to the in-scope set, but do not remove
 -- any existing substitutions for it
-addInScopeSet :: Subst -> VarSet -> Subst
+addInScopeSet :: SubstFor b -> VarSet -> SubstFor b
 addInScopeSet (Subst in_scope ids tvs cvs) vs
   = Subst (in_scope `extendInScopeSetSet` vs) ids tvs cvs
 
 -- | Add the 'Var' to the in-scope set: as a side effect,
 -- and remove any existing substitutions for it
-extendInScope :: Subst -> Var -> Subst
+extendInScope :: SubstFor b -> Var -> SubstFor b
 extendInScope (Subst in_scope ids tvs cvs) v
   = Subst (in_scope `extendInScopeSet` v)
           (ids `delVarEnv` v) (tvs `delVarEnv` v) (cvs `delVarEnv` v)
 
 -- | Add the 'Var's to the in-scope set: see also 'extendInScope'
-extendInScopeList :: Subst -> [Var] -> Subst
+extendInScopeList :: SubstFor b -> [Var] -> SubstFor b
 extendInScopeList (Subst in_scope ids tvs cvs) vs
   = Subst (in_scope `extendInScopeSetList` vs)
           (ids `delVarEnvList` vs) (tvs `delVarEnvList` vs) (cvs `delVarEnvList` vs)
 
 -- | Optimized version of 'extendInScopeList' that can be used if you are certain
 -- all the things being added are 'Id's and hence none are 'TyVar's or 'CoVar's
-extendInScopeIds :: Subst -> [Id] -> Subst
+extendInScopeIds :: SubstFor b -> [Id] -> SubstFor b
 extendInScopeIds (Subst in_scope ids tvs cvs) vs
   = Subst (in_scope `extendInScopeSetList` vs)
           (ids `delVarEnvList` vs) tvs cvs
 
-setInScope :: Subst -> InScopeSet -> Subst
+setInScope :: SubstFor b -> InScopeSet -> SubstFor b
 setInScope (Subst _ ids tvs cvs) in_scope = Subst in_scope ids tvs cvs
 
 -- Pretty printing, for debugging only
 
-instance Outputable Subst where
+instance OutputableBndr b => Outputable (SubstFor b) where
   ppr (Subst in_scope ids tvs cvs)
         =  text "<InScope =" <+> braces (fsep (map ppr (varEnvElts (getInScopeVars in_scope))))
         $$ text " IdSubst   =" <+> ppr ids
@@ -358,16 +374,16 @@ instance Outputable Subst where
 --
 -- Do *not* attempt to short-cut in the case of an empty substitution!
 -- See Note [Extending the Subst]
-substExprSC :: SDoc -> Subst -> CoreExpr -> CoreExpr
+substExprSC :: WrappedBndr b => SDoc -> SubstFor b -> Expr b -> Expr b
 substExprSC doc subst orig_expr
   | isEmptySubst subst = orig_expr
   | otherwise          = -- pprTrace "enter subst-expr" (doc $$ ppr orig_expr) $
                          subst_expr doc subst orig_expr
 
-substExpr :: SDoc -> Subst -> CoreExpr -> CoreExpr
+substExpr :: WrappedBndr b => SDoc -> SubstFor b -> Expr b -> Expr b
 substExpr doc subst orig_expr = subst_expr doc subst orig_expr
 
-subst_expr :: SDoc -> Subst -> CoreExpr -> CoreExpr
+subst_expr :: WrappedBndr b => SDoc -> SubstFor b -> Expr b -> Expr b
 subst_expr doc subst expr
   = go expr
   where
@@ -402,7 +418,7 @@ subst_expr doc subst expr
 
 -- | Apply a substitution to an entire 'CoreBind', additionally returning an updated 'Subst'
 -- that should be used by subsequent substitutions.
-substBind, substBindSC :: Subst -> CoreBind -> (Subst, CoreBind)
+substBind, substBindSC :: WrappedBndr b => SubstFor b -> Bind b -> (SubstFor b, Bind b)
 
 substBindSC subst bind    -- Short-cut if the substitution is empty
   | not (isEmptySubst subst)
@@ -442,7 +458,7 @@ substBind subst (Rec pairs)
 --
 -- [Aug 09] This function is not used in GHC at the moment, but seems so
 --          short and simple that I'm going to leave it here
-deShadowBinds :: CoreProgram -> CoreProgram
+deShadowBinds :: WrappedBndr b => [Bind b] -> [Bind b]
 deShadowBinds binds = snd (mapAccumL substBind emptySubst binds)
 
 {-
@@ -461,37 +477,39 @@ preserve occ info in rules.
 -- | Substitutes a 'Var' for another one according to the 'Subst' given, returning
 -- the result and an updated 'Subst' that should be used by subsequent substitutions.
 -- 'IdInfo' is preserved by this process, although it is substituted into appropriately.
-substBndr :: Subst -> Var -> (Subst, Var)
+substBndr :: WrappedBndr b => SubstFor b -> b -> (SubstFor b, b)
 substBndr subst bndr
-  | isTyVar bndr  = substTyVarBndr subst bndr
-  | isCoVar bndr  = substCoVarBndr subst bndr
-  | otherwise     = substIdBndr (text "var-bndr") subst subst bndr
+  | isTyBndr bndr  = substTyVarBndr subst bndr
+  | isCoBndr bndr  = substCoVarBndr subst bndr
+  | otherwise      = substIdBndr (text "var-bndr") subst subst bndr
 
 -- | Applies 'substBndr' to a number of 'Var's, accumulating a new 'Subst' left-to-right
-substBndrs :: Subst -> [Var] -> (Subst, [Var])
+substBndrs :: WrappedBndr b => SubstFor b -> [b] -> (SubstFor b, [b])
 substBndrs subst bndrs = mapAccumL substBndr subst bndrs
 
 -- | Substitute in a mutually recursive group of 'Id's
-substRecBndrs :: Subst -> [Id] -> (Subst, [Id])
+substRecBndrs :: WrappedBndr b => SubstFor b -> [b] -> (SubstFor b, [b])
 substRecBndrs subst bndrs
   = (new_subst, new_bndrs)
   where         -- Here's the reason we need to pass rec_subst to subst_id
     (new_subst, new_bndrs) = mapAccumL (substIdBndr (text "rec-bndr") new_subst) subst bndrs
 
-substIdBndr :: SDoc
-            -> Subst            -- ^ Substitution to use for the IdInfo
-            -> Subst -> Id      -- ^ Substitution and Id to transform
-            -> (Subst, Id)      -- ^ Transformed pair
+substIdBndr :: WrappedBndr b
+            => SDoc
+            -> SubstFor b            -- ^ Substitution to use for the IdInfo
+            -> SubstFor b -> b       -- ^ Substitution and Id to transform
+            -> (SubstFor b, b)       -- ^ Transformed pair
                                 -- NB: unfolding may be zapped
 
-substIdBndr _doc rec_subst subst@(Subst in_scope env tvs cvs) old_id
+substIdBndr _doc rec_subst subst@(Subst in_scope env tvs cvs) old_bndr
   = -- pprTrace "substIdBndr" (doc $$ ppr old_id $$ ppr in_scope) $
-    (Subst (in_scope `extendInScopeSet` new_id) new_env tvs cvs, new_id)
+    (Subst (in_scope `extendInScopeSet` new_id) new_env tvs cvs, new_bndr)
   where
     id1 = uniqAway in_scope old_id      -- id1 is cloned if necessary
     id2 | no_type_change = id1
         | otherwise      = setIdType id1 (substTy subst old_ty)
 
+    old_id = unwrapBndr old_bndr
     old_ty = idType old_id
     no_type_change = (isEmptyVarEnv tvs && isEmptyVarEnv cvs) ||
                      isEmptyVarSet (tyCoVarsOfType old_ty)
@@ -500,6 +518,7 @@ substIdBndr _doc rec_subst subst@(Subst in_scope env tvs cvs) old_id
         -- The lazy-set is because we're in a loop here, with
         -- rec_subst, when dealing with a mutually-recursive group
     new_id = maybeModifyIdInfo mb_new_info id2
+    new_bndr = rewrapBndr old_bndr new_id
     mb_new_info = substIdInfo rec_subst id2 (idInfo id2)
         -- NB: unfolding info may be zapped
 
@@ -519,29 +538,29 @@ It also unconditionally zaps the OccInfo.
 
 -- | Very similar to 'substBndr', but it always allocates a new 'Unique' for
 -- each variable in its output.  It substitutes the IdInfo though.
-cloneIdBndr :: Subst -> UniqSupply -> Id -> (Subst, Id)
+cloneIdBndr :: WrappedBndr b => SubstFor b -> UniqSupply -> b -> (SubstFor b, b)
 cloneIdBndr subst us old_id
   = clone_id subst subst (old_id, uniqFromSupply us)
 
 -- | Applies 'cloneIdBndr' to a number of 'Id's, accumulating a final
 -- substitution from left to right
-cloneIdBndrs :: Subst -> UniqSupply -> [Id] -> (Subst, [Id])
+cloneIdBndrs :: WrappedBndr b => SubstFor b -> UniqSupply -> [b] -> (SubstFor b, [b])
 cloneIdBndrs subst us ids
   = mapAccumL (clone_id subst) subst (ids `zip` uniqsFromSupply us)
 
-cloneBndrs :: Subst -> UniqSupply -> [Var] -> (Subst, [Var])
+cloneBndrs :: WrappedBndr b => SubstFor b -> UniqSupply -> [b] -> (SubstFor b, [b])
 -- Works for all kinds of variables (typically case binders)
 -- not just Ids
 cloneBndrs subst us vs
   = mapAccumL (\subst (v, u) -> cloneBndr subst u v) subst (vs `zip` uniqsFromSupply us)
 
-cloneBndr :: Subst -> Unique -> Var -> (Subst, Var)
+cloneBndr :: WrappedBndr b => SubstFor b -> Unique -> b -> (SubstFor b, b)
 cloneBndr subst uniq v
-  | isTyVar v = cloneTyVarBndr subst v uniq
-  | otherwise = clone_id subst subst (v,uniq)  -- Works for coercion variables too
+  | isTyBndr v = cloneTyVarBndr subst v uniq
+  | otherwise  = clone_id subst subst (v,uniq)  -- Works for coercion variables too
 
 -- | Clone a mutually recursive group of 'Id's
-cloneRecIdBndrs :: Subst -> UniqSupply -> [Id] -> (Subst, [Id])
+cloneRecIdBndrs :: WrappedBndr b => SubstFor b -> UniqSupply -> [b] -> (SubstFor b, [b])
 cloneRecIdBndrs subst us ids
   = (subst', ids')
   where
@@ -550,16 +569,19 @@ cloneRecIdBndrs subst us ids
 
 -- Just like substIdBndr, except that it always makes a new unique
 -- It is given the unique to use
-clone_id    :: Subst                    -- Substitution for the IdInfo
-            -> Subst -> (Id, Unique)    -- Substitution and Id to transform
-            -> (Subst, Id)              -- Transformed pair
+clone_id    :: WrappedBndr b
+            => SubstFor b                    -- Substitution for the IdInfo
+            -> SubstFor b -> (b, Unique)     -- Substitution and Id to transform
+            -> (SubstFor b, b)               -- Transformed pair
 
-clone_id rec_subst subst@(Subst in_scope idvs tvs cvs) (old_id, uniq)
-  = (Subst (in_scope `extendInScopeSet` new_id) new_idvs tvs new_cvs, new_id)
+clone_id rec_subst subst@(Subst in_scope idvs tvs cvs) (old_bndr, uniq)
+  = (Subst (in_scope `extendInScopeSet` new_id) new_idvs tvs new_cvs, new_bndr)
   where
+    old_id  = unwrapBndr old_bndr
     id1     = setVarUnique old_id uniq
     id2     = substIdType subst id1
     new_id  = maybeModifyIdInfo (substIdInfo rec_subst id2 (idInfo old_id)) id2
+    new_bndr = rewrapBndr old_bndr new_id
     (new_idvs, new_cvs) | isCoVar old_id = (idvs, extendVarEnv cvs old_id (mkCoVarCo new_id))
                         | otherwise      = (extendVarEnv idvs old_id (Var new_id), cvs)
 
@@ -575,33 +597,33 @@ Type and Coercion, but we have to repackage the substitution, from a
 Subst to a TCvSubst.
 -}
 
-substTyVarBndr :: Subst -> TyVar -> (Subst, TyVar)
+substTyVarBndr :: WrappedBndr b => SubstFor b -> b -> (SubstFor b, b)
 substTyVarBndr (Subst in_scope id_env tv_env cv_env) tv
-  = case Type.substTyVarBndr (TCvSubst in_scope tv_env cv_env) tv of
+  = case Type.substTyVarBndr (TCvSubst in_scope tv_env cv_env) (unwrapBndr tv) of
         (TCvSubst in_scope' tv_env' cv_env', tv')
-           -> (Subst in_scope' id_env tv_env' cv_env', tv')
+           -> (Subst in_scope' id_env tv_env' cv_env', rewrapBndr tv tv')
 
-cloneTyVarBndr :: Subst -> TyVar -> Unique -> (Subst, TyVar)
+cloneTyVarBndr :: WrappedBndr b => SubstFor b -> b -> Unique -> (SubstFor b, b)
 cloneTyVarBndr (Subst in_scope id_env tv_env cv_env) tv uniq
-  = case Type.cloneTyVarBndr (TCvSubst in_scope tv_env cv_env) tv uniq of
+  = case Type.cloneTyVarBndr (TCvSubst in_scope tv_env cv_env) (unwrapBndr tv) uniq of
         (TCvSubst in_scope' tv_env' cv_env', tv')
-           -> (Subst in_scope' id_env tv_env' cv_env', tv')
+           -> (Subst in_scope' id_env tv_env' cv_env', rewrapBndr tv tv')
 
-substCoVarBndr :: Subst -> TyVar -> (Subst, TyVar)
+substCoVarBndr :: WrappedBndr b => SubstFor b -> b -> (SubstFor b, b)
 substCoVarBndr (Subst in_scope id_env tv_env cv_env) cv
-  = case Coercion.substCoVarBndr (TCvSubst in_scope tv_env cv_env) cv of
+  = case Coercion.substCoVarBndr (TCvSubst in_scope tv_env cv_env) (unwrapBndr cv) of
         (TCvSubst in_scope' tv_env' cv_env', cv')
-           -> (Subst in_scope' id_env tv_env' cv_env', cv')
+           -> (Subst in_scope' id_env tv_env' cv_env', rewrapBndr cv cv')
 
 -- | See 'Type.substTy'
-substTy :: Subst -> Type -> Type
+substTy :: SubstFor b -> Type -> Type
 substTy subst ty = Type.substTyUnchecked (getTCvSubst subst) ty
 
-getTCvSubst :: Subst -> TCvSubst
+getTCvSubst :: SubstFor b -> TCvSubst
 getTCvSubst (Subst in_scope _ tenv cenv) = TCvSubst in_scope tenv cenv
 
 -- | See 'Coercion.substCo'
-substCo :: Subst -> Coercion -> Coercion
+substCo :: SubstFor b -> Coercion -> Coercion
 substCo subst co = Coercion.substCo (getTCvSubst subst) co
 
 {-
@@ -612,7 +634,7 @@ substCo subst co = Coercion.substCo (getTCvSubst subst) co
 ************************************************************************
 -}
 
-substIdType :: Subst -> Id -> Id
+substIdType :: SubstFor b -> Id -> Id
 substIdType subst@(Subst _ _ tv_env cv_env) id
   | (isEmptyVarEnv tv_env && isEmptyVarEnv cv_env) || isEmptyVarSet (tyCoVarsOfType old_ty) = id
   | otherwise   = setIdType id (substTy subst old_ty)
@@ -624,7 +646,7 @@ substIdType subst@(Subst _ _ tv_env cv_env) id
 
 ------------------
 -- | Substitute into some 'IdInfo' with regard to the supplied new 'Id'.
-substIdInfo :: Subst -> Id -> IdInfo -> Maybe IdInfo
+substIdInfo :: WrappedBndr b => SubstFor b -> Id -> IdInfo -> Maybe IdInfo
 substIdInfo subst new_id info
   | nothing_to_do = Nothing
   | otherwise     = Just (info `setRuleInfo`      substSpec subst new_id old_rules
@@ -637,7 +659,7 @@ substIdInfo subst new_id info
 
 ------------------
 -- | Substitutes for the 'Id's within an unfolding
-substUnfolding, substUnfoldingSC :: Subst -> Unfolding -> Unfolding
+substUnfolding, substUnfoldingSC :: WrappedBndr b => SubstFor b -> Unfolding -> Unfolding
         -- Seq'ing on the returned Unfolding is enough to cause
         -- all the substitutions to happen completely
 
@@ -648,7 +670,7 @@ substUnfoldingSC subst unf       -- Short-cut version
 substUnfolding subst df@(DFunUnfolding { df_bndrs = bndrs, df_args = args })
   = df { df_bndrs = bndrs', df_args = args' }
   where
-    (subst',bndrs') = substBndrs subst bndrs
+    (subst',bndrs') = substBndrs (unwrapBndrsInSubst subst) bndrs
     args'           = map (substExpr (text "subst-unf:dfun") subst') args
 
 substUnfolding subst unf@(CoreUnfolding { uf_tmpl = tmpl, uf_src = src })
@@ -659,12 +681,12 @@ substUnfolding subst unf@(CoreUnfolding { uf_tmpl = tmpl, uf_src = src })
   = seqExpr new_tmpl `seq`
     unf { uf_tmpl = new_tmpl }
   where
-    new_tmpl = substExpr (text "subst-unf") subst tmpl
+    new_tmpl = substExpr (text "subst-unf") (unwrapBndrsInSubst subst) tmpl
 
 substUnfolding _ unf = unf      -- NoUnfolding, OtherCon
 
 ------------------
-substIdOcc :: Subst -> Id -> Id
+substIdOcc :: WrappedBndr b => SubstFor b -> Id -> Id
 -- These Ids should not be substituted to non-Ids
 substIdOcc subst v = case lookupIdSubst (text "substIdOcc") subst v of
                         Var v' -> v'
@@ -672,7 +694,7 @@ substIdOcc subst v = case lookupIdSubst (text "substIdOcc") subst v of
 
 ------------------
 -- | Substitutes for the 'Id's within the 'WorkerInfo' given the new function 'Id'
-substSpec :: Subst -> Id -> RuleInfo -> RuleInfo
+substSpec :: WrappedBndr b => SubstFor b -> Id -> RuleInfo -> RuleInfo
 substSpec subst new_id (RuleInfo rules rhs_fvs)
   = seqRuleInfo new_spec `seq` new_spec
   where
@@ -681,14 +703,14 @@ substSpec subst new_id (RuleInfo rules rhs_fvs)
                         (substDVarSet subst rhs_fvs)
 
 ------------------
-substRulesForImportedIds :: Subst -> [CoreRule] -> [CoreRule]
+substRulesForImportedIds :: WrappedBndr b => SubstFor b -> [CoreRule] -> [CoreRule]
 substRulesForImportedIds subst rules
   = map (substRule subst not_needed) rules
   where
     not_needed name = pprPanic "substRulesForImportedIds" (ppr name)
 
 ------------------
-substRule :: Subst -> (Name -> Name) -> CoreRule -> CoreRule
+substRule :: WrappedBndr b => SubstFor b -> (Name -> Name) -> CoreRule -> CoreRule
 
 -- The subst_ru_fn argument is applied to substitute the ru_fn field
 -- of the rule:
@@ -710,22 +732,22 @@ substRule subst subst_ru_fn rule@(Rule { ru_bndrs = bndrs, ru_args = args
            -- See Note [Substitute lazily]
   where
     doc = text "subst-rule" <+> ppr fn_name
-    (subst', bndrs') = substBndrs subst bndrs
+    (subst', bndrs') = substBndrs (unwrapBndrsInSubst subst) bndrs
 
 ------------------
-substVects :: Subst -> [CoreVect] -> [CoreVect]
+substVects :: WrappedBndr b => SubstFor b -> [CoreVect] -> [CoreVect]
 substVects subst = map (substVect subst)
 
 ------------------
-substVect :: Subst -> CoreVect -> CoreVect
-substVect subst  (Vect v rhs)        = Vect v (simpleOptExprWith subst rhs)
+substVect :: WrappedBndr b => SubstFor b -> CoreVect -> CoreVect
+substVect subst  (Vect v rhs)        = Vect v (simpleOptExprWith (unwrapBndrsInSubst subst) rhs)
 substVect _subst vd@(NoVect _)       = vd
 substVect _subst vd@(VectType _ _ _) = vd
 substVect _subst vd@(VectClass _)    = vd
 substVect _subst vd@(VectInst _)     = vd
 
 ------------------
-substDVarSet :: Subst -> DVarSet -> DVarSet
+substDVarSet :: WrappedBndr b => SubstFor b -> DVarSet -> DVarSet
 substDVarSet subst fvs
   = mkDVarSet $ fst $ foldr (subst_fv subst) ([], emptyVarSet) $ dVarSetElems fvs
   where
@@ -734,11 +756,11 @@ substDVarSet subst fvs
      | otherwise = tyCoVarsOfTypeAcc (lookupTCvSubst subst fv) (const True) emptyVarSet $! acc
 
 ------------------
-substTickish :: Subst -> Tickish Id -> Tickish Id
+substTickish :: WrappedBndr b => SubstFor b -> Tickish Id -> Tickish Id
 substTickish subst (Breakpoint n ids)
    = Breakpoint n (map do_one ids)
  where
-    do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") subst
+    do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") (unwrapBndrsInSubst subst)
 substTickish _subst other = other
 
 {- Note [Substitute lazily]
@@ -894,7 +916,7 @@ simpleOptPgm dflags this_mod binds rules vects
   where
     occ_anald_binds  = occurAnalysePgm this_mod (\_ -> False) {- No rules active -}
                                        rules vects emptyVarEnv binds
-    (subst', binds') = foldl do_one (emptySubst, []) occ_anald_binds
+    (subst', binds') = foldl do_one (emptySubst :: Subst, []) occ_anald_binds
 
     do_one (subst, binds') bind
       = case simple_opt_bind subst bind of
@@ -1199,19 +1221,24 @@ we must parse it back into a FastString to split off the first character.
 That way we can treat unpackCString# and unpackCStringUtf8# in the same way.
 -}
 
-data ConCont = CC [CoreExpr] Coercion
+data ConCont b = CC [Expr b] Coercion
                   -- Substitution already applied
 
 -- | Returns @Just (dc, [t1..tk], [x1..xn])@ if the argument expression is
 -- a *saturated* constructor application of the form @dc t1..tk x1 .. xn@,
 -- where t1..tk are the *universally-qantified* type args of 'dc'
 exprIsConApp_maybe :: InScopeEnv -> CoreExpr -> Maybe (DataCon, [Type], [CoreExpr])
-exprIsConApp_maybe (in_scope, id_unf) expr
+exprIsConApp_maybe = exprIsConAppWith_maybe id
+
+exprIsConAppWith_maybe :: forall b. WrappedBndr b
+                       => (CoreBndr -> b) -> InScopeEnv -> Expr b
+                       -> Maybe (DataCon, [Type], [Expr b])
+exprIsConAppWith_maybe wrap (in_scope, id_unf) expr
   = go (Left in_scope) expr (CC [] (mkRepReflCo (exprType expr)))
   where
-    go :: Either InScopeSet Subst
-       -> CoreExpr -> ConCont
-       -> Maybe (DataCon, [Type], [CoreExpr])
+    go :: Either InScopeSet (SubstFor b)
+       -> Expr b -> ConCont b
+       -> Maybe (DataCon, [Type], [Expr b])
     go subst (Tick t expr) cont
        | not (tickishIsCode t) = go subst expr cont
     go subst (Cast expr co1) (CC [] co2)
@@ -1233,10 +1260,11 @@ exprIsConApp_maybe (in_scope, id_unf) expr
         = dealWithCoercion co con args
 
         -- Look through dictionary functions; see Note [Unfolding DFuns]
-        | DFunUnfolding { df_bndrs = bndrs, df_con = con, df_args = dfun_args } <- unfolding
-        , bndrs `equalLength` args    -- See Note [DFun arity check]
+        | DFunUnfolding { df_bndrs = core_bndrs, df_con = con, df_args = dfun_args } <- unfolding
+        , core_bndrs `equalLength` args    -- See Note [DFun arity check]
+        , let bndrs = map wrap core_bndrs
         , let subst = mkOpenSubst in_scope (bndrs `zip` args)
-        = dealWithCoercion co con (map (substExpr (text "exprIsConApp1") subst) dfun_args)
+        = dealWithCoercion co con (map (substExpr (text "exprIsConApp1") subst) (map (mapExpr wrap) dfun_args))
 
         -- Look through unfoldings, but only arity-zero one;
         -- if arity > 0 we are effectively inlining a function call,
@@ -1246,7 +1274,7 @@ exprIsConApp_maybe (in_scope, id_unf) expr
         | idArity fun == 0
         , Just rhs <- expandUnfolding_maybe unfolding
         , let in_scope' = extendInScopeSetSet in_scope (exprFreeVars rhs)
-        = go (Left in_scope') rhs cont
+        = go (Left in_scope') (mapExpr wrap rhs) cont
 
         | (fun `hasKey` unpackCStringIdKey)
          || (fun `hasKey` unpackCStringUtf8IdKey)
@@ -1270,8 +1298,9 @@ exprIsConApp_maybe (in_scope, id_unf) expr
     extend (Right s)       v e = Right (extendSubst s v e)
 
 -- See Note [exprIsConApp_maybe on literal strings]
-dealWithStringLiteral :: Var -> BS.ByteString -> Coercion
-                      -> Maybe (DataCon, [Type], [CoreExpr])
+dealWithStringLiteral :: WrappedBndr b
+                      => Var -> BS.ByteString -> Coercion
+                      -> Maybe (DataCon, [Type], [Expr b])
 
 -- This is not possible with user-supplied empty literals, MkCore.mkStringExprFS
 -- turns those into [] automatically, but just in case something else in GHC
@@ -1294,8 +1323,9 @@ dealWithStringLiteral fun str co
 
     in dealWithCoercion co consDataCon [Type charTy, char, rest]
 
-dealWithCoercion :: Coercion -> DataCon -> [CoreExpr]
-                 -> Maybe (DataCon, [Type], [CoreExpr])
+dealWithCoercion :: WrappedBndr b
+                 => Coercion -> DataCon -> [Expr b]
+                 -> Maybe (DataCon, [Type], [Expr b])
 dealWithCoercion co dc dc_args
   | isReflCo co || from_ty `eqType` to_ty  -- try cheap test first
   , let (univ_ty_args, rest_args) = splitAtList (dataConUnivTyVars dc) dc_args

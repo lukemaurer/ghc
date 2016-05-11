@@ -7,7 +7,7 @@ module MkCore (
         mkCoreApp, mkCoreApps, mkCoreConApps,
         mkCoreLams, mkWildCase, mkIfThenElse,
         mkWildValBinder, mkWildEvBinder,
-        sortQuantVars, castBottomExpr,
+        sortQuantVars, castBottomExpr, castBottomExprWith,
 
         -- * Constructing boxed literals
         mkWordExpr, mkWordExprWord,
@@ -203,9 +203,12 @@ castBottomExpr :: CoreExpr -> Type -> CoreExpr
 -- (castBottomExpr e ty), assuming that 'e' diverges,
 -- return an expression of type 'ty'
 -- See Note [Empty case alternatives] in CoreSyn
-castBottomExpr e res_ty
+castBottomExpr = castBottomExprWith id
+
+castBottomExprWith :: WrappedBndr b => (CoreBndr -> b) -> Expr b -> Type -> Expr b
+castBottomExprWith wrap e res_ty
   | e_ty `eqType` res_ty = e
-  | otherwise            = Case e (mkWildValBinder e_ty) res_ty []
+  | otherwise            = Case e (wrap (mkWildValBinder e_ty)) res_ty []
   where
     e_ty = exprType e
 
@@ -632,7 +635,7 @@ mkRuntimeErrorApp
                         --      where Addr# points to a UTF8 encoded string
         -> Type         -- The type to instantiate 'a'
         -> String       -- The string to print
-        -> CoreExpr
+        -> Expr b
 
 mkRuntimeErrorApp err_id res_ty err_msg
   = mkApps (Var err_id) [ Type (getRuntimeRep "mkRuntimeErrorApp" res_ty)
@@ -640,7 +643,7 @@ mkRuntimeErrorApp err_id res_ty err_msg
   where
     err_string = Lit (mkMachString err_msg)
 
-mkImpossibleExpr :: Type -> CoreExpr
+mkImpossibleExpr :: Type -> Expr b
 mkImpossibleExpr res_ty
   = mkRuntimeErrorApp rUNTIME_ERROR_ID res_ty "Impossible case alternative"
 

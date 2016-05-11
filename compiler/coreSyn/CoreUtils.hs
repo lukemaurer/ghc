@@ -6,7 +6,7 @@
 Utility functions on @Core@ syntax
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 
 -- | Commonly useful utilites for manipulating the Core language
 module CoreUtils (
@@ -19,7 +19,7 @@ module CoreUtils (
         -- * Taking expressions apart
         findDefault, addDefault, findAlt, isDefaultAlt,
         mergeAlts, trimConArgs,
-        filterAlts, combineIdenticalAlts, refineDefaultAlt,
+        filterAlts, combineIdenticalAlts, refineDefaultAlt, refineDefaultAltWith,
 
         -- * Properties of expressions
         exprType, coreAltType, coreAltsType,
@@ -88,7 +88,7 @@ import OrdList
 ************************************************************************
 -}
 
-exprType :: CoreExpr -> Type
+exprType :: WrappedBndr b => Expr b -> Type
 -- ^ Recover the type of a well-typed Core expression. Fails when
 -- applied to the actual 'CoreSyn.Type' expression as it cannot
 -- really be said to have a type
@@ -96,13 +96,14 @@ exprType (Var var)           = idType var
 exprType (Lit lit)           = literalType lit
 exprType (Coercion co)       = coercionType co
 exprType (Let bind body)
-  | NonRec tv rhs <- bind    -- See Note [Type bindings]
+  | NonRec b rhs <- bind     -- See Note [Type bindings]
+  , let tv = unwrapBndr b
   , Type ty <- rhs           = substTyWithUnchecked [tv] [ty] (exprType body)
   | otherwise                = exprType body
 exprType (Case _ _ ty _)     = ty
 exprType (Cast _ co)         = pSnd (coercionKind co)
 exprType (Tick _ e)          = exprType e
-exprType (Lam binder expr)   = mkPiType binder (exprType expr)
+exprType (Lam binder expr)   = mkPiType (unwrapBndr binder) (exprType expr)
 exprType e@(App _ _)
   = case collectArgs e of
         (fun, args) -> applyTypeToArgs e (exprType fun) args
@@ -162,7 +163,7 @@ Note that there might be existentially quantified coercion variables, too.
 -}
 
 -- Not defined with applyTypeToArg because you can't print from CoreSyn.
-applyTypeToArgs :: CoreExpr -> Type -> [CoreExpr] -> Type
+applyTypeToArgs :: OutputableBndr b => Expr b -> Type -> [Expr b] -> Type
 -- ^ A more efficient version of 'applyTypeToArg' when we have several arguments.
 -- The first argument is just for debugging, and gives some context
 applyTypeToArgs e op_ty args
@@ -199,7 +200,7 @@ applyTypeToArgs e op_ty args
 
 -- | Wrap the given expression in the coercion safely, dropping
 -- identity coercions and coalescing nested coercions
-mkCast :: CoreExpr -> Coercion -> CoreExpr
+mkCast :: WrappedBndr b => Expr b -> Coercion -> Expr b
 mkCast e co
   | ASSERT2( coercionRole co == Representational
            , text "coercion" <+> ppr co <+> ptext (sLit "passed to mkCast")
@@ -236,17 +237,17 @@ mkCast expr co
 
 -- | Wraps the given expression in the source annotation, dropping the
 -- annotation if possible.
-mkTick :: Tickish Id -> CoreExpr -> CoreExpr
+mkTick :: forall b. WrappedBndr b => Tickish Id -> Expr b -> Expr b
 mkTick t orig_expr = mkTick' id id orig_expr
  where
   -- Some ticks (cost-centres) can be split in two, with the
   -- non-counting part having laxer placement properties.
   canSplit = tickishCanSplit t && tickishPlace (mkNoCount t) /= tickishPlace t
 
-  mkTick' :: (CoreExpr -> CoreExpr) -- ^ apply after adding tick (float through)
-          -> (CoreExpr -> CoreExpr) -- ^ apply before adding tick (float with)
-          -> CoreExpr               -- ^ current expression
-          -> CoreExpr
+  mkTick' :: (Expr b -> Expr b) -- ^ apply after adding tick (float through)
+          -> (Expr b -> Expr b) -- ^ apply before adding tick (float with)
+          -> Expr b             -- ^ current expression
+          -> Expr b
   mkTick' top rest expr = case expr of
 
     -- Cost centre ticks should never be reordered relative to each
@@ -321,10 +322,10 @@ mkTick t orig_expr = mkTick' id id orig_expr
     -- Catch-all: Annotate where we stand
     _any -> top $ Tick t $ rest expr
 
-mkTicks :: [Tickish Id] -> CoreExpr -> CoreExpr
+mkTicks :: WrappedBndr b => [Tickish Id] -> Expr b -> Expr b
 mkTicks ticks expr = foldr mkTick expr ticks
 
-isSaturatedConApp :: CoreExpr -> Bool
+isSaturatedConApp :: Expr b -> Bool
 isSaturatedConApp e = go e []
   where go (App f a) as = go f (a:as)
         go (Var fun) args
@@ -332,13 +333,13 @@ isSaturatedConApp e = go e []
         go (Cast f _) as = go f as
         go _ _ = False
 
-mkTickNoHNF :: Tickish Id -> CoreExpr -> CoreExpr
+mkTickNoHNF :: WrappedBndr b => Tickish Id -> Expr b -> Expr b
 mkTickNoHNF t e
   | exprIsHNF e = tickHNFArgs t e
   | otherwise   = mkTick t e
 
 -- push a tick into the arguments of a HNF (call or constructor app)
-tickHNFArgs :: Tickish Id -> CoreExpr -> CoreExpr
+tickHNFArgs :: WrappedBndr b => Tickish Id -> Expr b -> Expr b
 tickHNFArgs t e = push t e
  where
   push t (App f (Type u)) = App (push t f) (Type u)
@@ -407,7 +408,7 @@ stripTicksT p expr = fromOL $ go expr
 ************************************************************************
 -}
 
-bindNonRec :: Id -> CoreExpr -> CoreExpr -> CoreExpr
+bindNonRec :: WrappedBndr b => b -> Expr b -> Expr b -> Expr b
 -- ^ @bindNonRec x r b@ produces either:
 --
 -- > let x = r in b
@@ -423,25 +424,28 @@ bindNonRec :: Id -> CoreExpr -> CoreExpr -> CoreExpr
 -- the simplifier deals with them perfectly well. See
 -- also 'MkCore.mkCoreLet'
 bindNonRec bndr rhs body
-  | needsCaseBinding (idType bndr) rhs = Case rhs bndr (exprType body) [(DEFAULT, [], body)]
+  | needsCaseBinding typ rhs           = Case rhs bndr (exprType body) [(DEFAULT, [], body)]
   | otherwise                          = Let (NonRec bndr rhs) body
+  where
+    typ = idType (unwrapBndr bndr)
 
 -- | Tests whether we have to use a @case@ rather than @let@ binding for this expression
 -- as per the invariants of 'CoreExpr': see "CoreSyn#let_app_invariant"
-needsCaseBinding :: Type -> CoreExpr -> Bool
+needsCaseBinding :: Type -> Expr b -> Bool
 needsCaseBinding ty rhs = isUnliftedType ty && not (exprOkForSpeculation rhs)
         -- Make a case expression instead of a let
         -- These can arise either from the desugarer,
         -- or from beta reductions: (\x.e) (x +# y)
 
-mkAltExpr :: AltCon     -- ^ Case alternative constructor
-          -> [CoreBndr] -- ^ Things bound by the pattern match
+mkAltExpr :: WrappedBndr b
+          => AltCon     -- ^ Case alternative constructor
+          -> [b]        -- ^ Things bound by the pattern match
           -> [Type]     -- ^ The type arguments to the case alternative
-          -> CoreExpr
+          -> Expr b
 -- ^ This guy constructs the value that the scrutinee must have
 -- given that you are in one particular branch of a case
 mkAltExpr (DataAlt con) args inst_tys
-  = mkConApp con (map Type inst_tys ++ varsToCoreExprs args)
+  = mkConApp con (map Type inst_tys ++ varsToCoreExprs (unwrapBndrs args))
 mkAltExpr (LitAlt lit) [] []
   = Lit lit
 mkAltExpr (LitAlt _) _ _ = panic "mkAltExpr LitAlt"
@@ -548,8 +552,8 @@ trimConArgs (DataAlt dc) args = dropList (dataConUnivTyVars dc) args
 filterAlts :: TyCon                -- ^ Type constructor of scrutinee's type (used to prune possibilities)
            -> [Type]               -- ^ And its type arguments
            -> [AltCon]             -- ^ 'imposs_cons': constructors known to be impossible due to the form of the scrutinee
-           -> [(AltCon, [Var], a)] -- ^ Alternatives
-           -> ([AltCon], [(AltCon, [Var], a)])
+           -> [(AltCon, [b], a)] -- ^ Alternatives
+           -> ([AltCon], [(AltCon, [b], a)])
              -- Returns:
              --  1. Constructors that will never be encountered by the
              --     *default* case (if any).  A superset of imposs_cons
@@ -589,9 +593,17 @@ refineDefaultAlt :: [Unique] -> TyCon -> [Type]
                  -> [AltCon]  -- Constructors tha cannot match the DEFAULT (if any)
                  -> [CoreAlt]
                  -> (Bool, [CoreAlt])
+refineDefaultAlt = refineDefaultAltWith id
+
+refineDefaultAltWith 
+                 :: (CoreBndr -> b)
+                 -> [Unique] -> TyCon -> [Type]
+                 -> [AltCon]  -- Constructors tha cannot match the DEFAULT (if any)
+                 -> [Alt b]
+                 -> (Bool, [Alt b])
 -- Refine the default alterantive to a DataAlt,
 -- if there is a unique way to do so
-refineDefaultAlt us tycon tys imposs_deflt_cons all_alts
+refineDefaultAltWith wrap us tycon tys imposs_deflt_cons all_alts
   | (DEFAULT,_,rhs) : rest_alts <- all_alts
   , isAlgTyCon tycon            -- It's a data type, tuple, or unboxed tuples.
   , not (isNewTyCon tycon)      -- We can have a newtype, if we are just doing an eval:
@@ -606,7 +618,7 @@ refineDefaultAlt us tycon tys imposs_deflt_cons all_alts
        []    -> (False, rest_alts)
 
        -- It matches exactly one constructor, so fill it in:
-       [con] -> (True, mergeAlts rest_alts [(DataAlt con, ex_tvs ++ arg_ids, rhs)])
+       [con] -> (True, mergeAlts rest_alts [(DataAlt con, map wrap (ex_tvs ++ arg_ids), rhs)])
                        -- We need the mergeAlts to keep the alternatives in the right order
              where
                 (ex_tvs, arg_ids) = dataConRepInstPat us con tys
@@ -710,15 +722,16 @@ missed the first one.)
 
 -}
 
-combineIdenticalAlts :: [AltCon]    -- Constructors that cannot match DEFAULT
-                     -> [CoreAlt]
+combineIdenticalAlts :: WrappedBndr b
+                     => [AltCon]    -- Constructors that cannot match DEFAULT
+                     -> [Alt b]
                      -> (Bool,      -- True <=> something happened
                          [AltCon],  -- New contructors that cannot match DEFAULT
-                         [CoreAlt]) -- New alternatives
+                         [Alt b]) -- New alternatives
 -- See Note [Combine identical alternatives]
 -- True <=> we did some combining, result is a single DEFAULT alternative
 combineIdenticalAlts imposs_deflt_cons ((con1,bndrs1,rhs1) : rest_alts)
-  | all isDeadBinder bndrs1    -- Remember the default
+  | all isDeadBinder (unwrapBndrs bndrs1)    -- Remember the default
   , not (null elim_rest) -- alternative comes first
   = (True, imposs_deflt_cons', deflt_alt : filtered_rest)
   where
@@ -734,7 +747,7 @@ combineIdenticalAlts imposs_deflt_cons ((con1,bndrs1,rhs1) : rest_alts)
 
     cheapEqTicked e1 e2 = cheapEqExpr' tickishFloatable e1 e2
     identical_to_alt1 (_con,bndrs,rhs)
-      = all isDeadBinder bndrs && rhs `cheapEqTicked` rhs1
+      = all isDeadBinder (unwrapBndrs bndrs) && rhs `cheapEqTicked` rhs1
     tickss = map (stripTicksT tickishFloatable . thdOf3) elim_rest
 
 combineIdenticalAlts imposs_cons alts
@@ -792,7 +805,7 @@ and that confuses the code generator (Trac #11155). So best to kill
 it off at source.
 -}
 
-exprIsTrivial :: CoreExpr -> Bool
+exprIsTrivial :: WrappedBndr b => Expr b -> Bool
 exprIsTrivial (Var _)          = True        -- See Note [Variables are trivial]
 exprIsTrivial (Type _)         = True
 exprIsTrivial (Coercion _)     = True
@@ -801,7 +814,7 @@ exprIsTrivial (App e arg)      = not (isRuntimeArg arg) && exprIsTrivial e
 exprIsTrivial (Tick t e)       = not (tickishIsCode t) && exprIsTrivial e
                                  -- See Note [Tick trivial]
 exprIsTrivial (Cast e _)       = exprIsTrivial e
-exprIsTrivial (Lam b body)     = not (isRuntimeVar b) && exprIsTrivial body
+exprIsTrivial (Lam b body)     = not (isRuntimeVar (unwrapBndr b)) && exprIsTrivial body
 exprIsTrivial (Case e _ _ [])  = exprIsTrivial e  -- See Note [Empty case is trivial]
 exprIsTrivial _                = False
 
@@ -812,7 +825,7 @@ that the expression we're substituting was originally trivial
 according to exprIsTrivial.
 -}
 
-getIdFromTrivialExpr :: CoreExpr -> Id
+getIdFromTrivialExpr :: WrappedBndr b => Expr b -> Id
 getIdFromTrivialExpr e = go e
   where go (Var v) = v
         go (App f t) | not (isRuntimeArg t) = go f
@@ -828,7 +841,7 @@ also CoreArity.exprBotStrictness_maybe, but that's a bit more
 expensive.
 -}
 
-exprIsBottom :: CoreExpr -> Bool
+exprIsBottom :: WrappedBndr b => Expr b -> Bool
 -- See Note [Bottoming expressions]
 exprIsBottom e
   | isEmptyTy (exprType e)
@@ -842,7 +855,7 @@ exprIsBottom e
     go n (Tick _ e)              = go n e
     go n (Cast e _)              = go n e
     go n (Let _ e)               = go n e
-    go n (Lam v e) | isTyVar v   = go n e
+    go n (Lam v e) | isTyBndr v  = go n e
     go _ (Case _ _ _ alts)       = null alts
        -- See Note [Empty case alternatives] in CoreSyn
     go _ _                       = False
@@ -896,11 +909,11 @@ Note [exprIsDupable]
                 and then inlining of case join points
 -}
 
-exprIsDupable :: DynFlags -> CoreExpr -> Bool
+exprIsDupable :: DynFlags -> Expr b -> Bool
 exprIsDupable dflags e
   = isJust (go dupAppSize e)
   where
-    go :: Int -> CoreExpr -> Maybe Int
+    go :: Int -> Expr b -> Maybe Int
     go n (Type {})     = Just n
     go n (Coercion {}) = Just n
     go n (Var {})      = decrement n
@@ -1027,13 +1040,13 @@ This responds True to exprIsHNF (you can discard a seq), but
 False to exprIsCheap.
 -}
 
-exprIsCheap :: CoreExpr -> Bool
+exprIsCheap :: WrappedBndr b => Expr b -> Bool
 exprIsCheap = exprIsCheap' isCheapApp
 
-exprIsExpandable :: CoreExpr -> Bool
+exprIsExpandable :: WrappedBndr b => Expr b -> Bool
 exprIsExpandable = exprIsCheap' isExpandableApp -- See Note [CONLIKE pragma] in BasicTypes
 
-exprIsCheap' :: CheapAppFun -> CoreExpr -> Bool
+exprIsCheap' :: forall b. WrappedBndr b => CheapAppFun -> Expr b -> Bool
 exprIsCheap' _        (Lit _)      = True
 exprIsCheap' _        (Type _)    = True
 exprIsCheap' _        (Coercion _) = True
@@ -1065,6 +1078,7 @@ exprIsCheap' good_app other_expr        -- Applications and variables
   = go other_expr []
   where
         -- Accumulate value arguments, then decide
+    go :: Expr b -> [Expr b] -> Bool
     go (Cast e _) val_args                 = go e val_args
     go (App f a) val_args | isRuntimeArg a = go f (a:val_args)
                           | otherwise      = go f val_args
@@ -1425,20 +1439,20 @@ We say "yes", even though 'x' may not be evaluated.  Reasons
 -- Suppose @f x@ diverges; then @C (f x)@ is not a value. However this can't
 -- happen: see "CoreSyn#let_app_invariant". This invariant states that arguments of
 -- unboxed type must be ok-for-speculation (or trivial).
-exprIsHNF :: CoreExpr -> Bool           -- True => Value-lambda, constructor, PAP
+exprIsHNF :: WrappedBndr b => Expr b -> Bool -- True => Value-lambda, constructor, PAP
 exprIsHNF = exprIsHNFlike isDataConWorkId isEvaldUnfolding
 
 -- | Similar to 'exprIsHNF' but includes CONLIKE functions as well as
 -- data constructors. Conlike arguments are considered interesting by the
 -- inliner.
-exprIsConLike :: CoreExpr -> Bool       -- True => lambda, conlike, PAP
+exprIsConLike :: WrappedBndr b => Expr b -> Bool -- True => lambda, conlike, PAP
 exprIsConLike = exprIsHNFlike isConLikeId isConLikeUnfolding
 
 -- | Returns true for values or value-like expressions. These are lambdas,
 -- constructors / CONLIKE functions (as determined by the function argument)
 -- or PAPs.
 --
-exprIsHNFlike :: (Var -> Bool) -> (Unfolding -> Bool) -> CoreExpr -> Bool
+exprIsHNFlike :: WrappedBndr b => (Var -> Bool) -> (Unfolding -> Bool) -> Expr b -> Bool
 exprIsHNFlike is_con is_con_unf = is_hnf_like
   where
     is_hnf_like (Var v) -- NB: There are no value args at this point
@@ -1468,7 +1482,7 @@ exprIsHNFlike is_con is_con_unf = is_hnf_like
 
     -- There is at least one value argument
     -- 'n' is number of value args to which the expression is applied
-    app_is_value :: CoreExpr -> Int -> Bool
+    app_is_value :: Expr b -> Int -> Bool
     app_is_value (Var fun) n_val_args
       = idArity fun > n_val_args    -- Under-applied function
         || is_con fun               --  or constructor-like
@@ -1930,22 +1944,22 @@ But the simplifier pushes those casts outwards, so we don't
 need to address that here.
 -}
 
-tryEtaReduce :: [Var] -> CoreExpr -> Maybe CoreExpr
+tryEtaReduce :: forall b. WrappedBndr b => [b] -> Expr b -> Maybe (Expr b)
 tryEtaReduce bndrs body
   = go (reverse bndrs) body (mkRepReflCo (exprType body))
   where
-    incoming_arity = count isId bndrs
+    incoming_arity = count isId (unwrapBndrs bndrs)
 
-    go :: [Var]            -- Binders, innermost first, types [a3,a2,a1]
-       -> CoreExpr         -- Of type tr
+    go :: [b]              -- Binders, innermost first, types [a3,a2,a1]
+       -> Expr b           -- Of type tr
        -> Coercion         -- Of type tr ~ ts
-       -> Maybe CoreExpr   -- Of type a1 -> a2 -> a3 -> ts
+       -> Maybe (Expr b)   -- Of type a1 -> a2 -> a3 -> ts
     -- See Note [Eta reduction with casted arguments]
     -- for why we have an accumulating coercion
     go [] fun co
       | ok_fun fun
       , let used_vars = exprFreeVars fun `unionVarSet` tyCoVarsOfCo co
-      , not (any (`elemVarSet` used_vars) bndrs)
+      , not (any (`elemVarSet` used_vars) (unwrapBndrs bndrs))
       = Just (mkCast fun co)   -- Check for any of the binders free in the result
                                -- including the accumulated coercion
 
@@ -1984,11 +1998,11 @@ tryEtaReduce bndrs body
          arity = idArity fun
 
     ---------------
-    ok_lam v = isTyVar v || isEvVar v
+    ok_lam v = isTyVar (unwrapBndr v) || isEvVar (unwrapBndr v)
 
     ---------------
-    ok_arg :: Var              -- Of type bndr_t
-           -> CoreExpr         -- Of type arg_t
+    ok_arg :: b                -- Of type bndr_t
+           -> Expr b           -- Of type arg_t
            -> Coercion         -- Of kind (t1~t2)
            -> Maybe (Coercion  -- Of type (arg_t -> t1 ~  bndr_t -> t2)
                                --   (and similarly for tyvars, coercion args)
@@ -1996,13 +2010,13 @@ tryEtaReduce bndrs body
     -- See Note [Eta reduction with casted arguments]
     ok_arg bndr (Type ty) co
        | Just tv <- getTyVar_maybe ty
-       , bndr == tv  = Just (mkHomoForAllCos [tv] co, [])
+       , unwrapBndr bndr == tv  = Just (mkHomoForAllCos [tv] co, [])
     ok_arg bndr (Var v) co
-       | bndr == v   = let reflCo = mkRepReflCo (idType bndr)
-                       in Just (mkFunCo Representational reflCo co, [])
+       | unwrapBndr bndr == v   = let reflCo = mkRepReflCo (idType (unwrapBndr bndr))
+                                  in Just (mkFunCo Representational reflCo co, [])
     ok_arg bndr (Cast e co_arg) co
        | (ticks, Var v) <- stripTicksTop tickishFloatable e
-       , bndr == v
+       , unwrapBndr bndr == v
        = Just (mkFunCo Representational (mkSymCo co_arg) co, ticks)
        -- The simplifier combines multiple casts into one,
        -- so we can have a simple-minded pattern match here

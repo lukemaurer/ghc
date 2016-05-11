@@ -11,7 +11,8 @@
 -- | Arity and eta expansion
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
-        exprEtaExpandArity, findRhsArity, CheapFun, etaExpand
+        exprEtaExpandArity, findRhsArity,
+        CheapFun, CheapFunOn, etaExpand, etaExpandWith
     ) where
 
 #include "HsVersions.h"
@@ -77,12 +78,12 @@ manifestArity (Cast e _)                = manifestArity e
 manifestArity _                         = 0
 
 ---------------
-exprArity :: CoreExpr -> Arity
+exprArity :: WrappedBndr b => Expr b -> Arity
 -- ^ An approximate, fast, version of 'exprEtaExpandArity'
 exprArity e = go e
   where
     go (Var v)                     = idArity v
-    go (Lam x e) | isId x          = go e + 1
+    go (Lam x e) | isIdBndr x      = go e + 1
                  | otherwise       = go e
     go (Tick t e) | not (tickishIsCode t) = go e
     go (Cast e co)                 = trim_arity (go e) (pSnd (coercionKind co))
@@ -478,7 +479,7 @@ vanillaArityType = ATop []      -- Totally uninformative
 
 -- ^ The Arity returned is the number of value args the
 -- expression can be applied to without doing much work
-exprEtaExpandArity :: DynFlags -> CoreExpr -> Arity
+exprEtaExpandArity :: WrappedBndr b => DynFlags -> Expr b -> Arity
 -- exprEtaExpandArity is used when eta expanding
 --      e  ==>  \xy -> e x y
 exprEtaExpandArity dflags e
@@ -494,7 +495,7 @@ getBotArity :: ArityType -> Maybe Arity
 getBotArity (ABot n) = Just n
 getBotArity _        = Nothing
 
-mk_cheap_fn :: DynFlags -> CheapAppFun -> CheapFun
+mk_cheap_fn :: WrappedBndr b => DynFlags -> CheapAppFun -> CheapFunOn b
 mk_cheap_fn dflags cheap_app
   | not (gopt Opt_DictsCheap dflags)
   = \e _     -> exprIsCheap' cheap_app e
@@ -506,7 +507,7 @@ mk_cheap_fn dflags cheap_app
 
 
 ----------------------
-findRhsArity :: DynFlags -> Id -> CoreExpr -> Arity -> Arity
+findRhsArity :: WrappedBndr b => DynFlags -> Id -> Expr b -> Arity -> Arity
 -- This implements the fixpoint loop for arity analysis
 -- See Note [Arity analysis]
 findRhsArity dflags bndr rhs old_arity
@@ -542,7 +543,7 @@ findRhsArity dflags bndr rhs old_arity
 
 -- ^ The Arity returned is the number of value args the
 -- expression can be applied to without doing much work
-rhsEtaExpandArity :: DynFlags -> CheapAppFun -> CoreExpr -> Arity
+rhsEtaExpandArity :: WrappedBndr b => DynFlags -> CheapAppFun -> Expr b -> Arity
 -- exprEtaExpandArity is used when eta expanding
 --      e  ==>  \xy -> e x y
 rhsEtaExpandArity dflags cheap_app e
@@ -559,7 +560,7 @@ rhsEtaExpandArity dflags cheap_app e
              , ae_ped_bot  = gopt Opt_PedanticBottoms dflags }
 
     has_lam (Tick _ e) = has_lam e
-    has_lam (Lam b e)  = isId b || has_lam e
+    has_lam (Lam b e)  = isIdBndr b || has_lam e
     has_lam _          = False
 
 {-
@@ -632,8 +633,8 @@ which we might not want.  After all, INLINE pragmas say "inline only
 when saturated" so we don't want to be too gung-ho about saturating!
 -}
 
-arityLam :: Id -> ArityType -> ArityType
-arityLam id (ATop as) = ATop (idOneShotInfo id : as)
+arityLam :: WrappedBndr b => b -> ArityType -> ArityType
+arityLam id (ATop as) = ATop (idOneShotInfo (unwrapBndr id) : as)
 arityLam _  (ABot n)  = ABot (n+1)
 
 floatIn :: Bool -> ArityType -> ArityType
@@ -684,17 +685,18 @@ basis that if we know one branch is one-shot, then they all must be.
 -}
 
 ---------------------------
-type CheapFun = CoreExpr -> Maybe Type -> Bool
+type CheapFunOn b = Expr b -> Maybe Type -> Bool
         -- How to decide if an expression is cheap
         -- If the Maybe is Just, the type is the type
         -- of the expression; Nothing means "don't know"
+type CheapFun = CheapFunOn CoreBndr
 
-data ArityEnv
-  = AE { ae_cheap_fn :: CheapFun
+data ArityEnv b
+  = AE { ae_cheap_fn :: CheapFunOn b
        , ae_ped_bot  :: Bool       -- True <=> be pedantic about bottoms
   }
 
-arityType :: ArityEnv -> CoreExpr -> ArityType
+arityType :: WrappedBndr b => ArityEnv b -> Expr b -> ArityType
 
 arityType env (Cast e co)
   = case arityType env e of
@@ -724,7 +726,7 @@ arityType _ (Var v)
 
         -- Lambdas; increase arity
 arityType env (Lam x e)
-  | isId x    = arityLam x (arityType env e)
+  | isIdBndr x = arityLam x (arityType env e)
   | otherwise = arityType env e
 
         -- Applications; decrease arity, except for types
@@ -763,7 +765,7 @@ arityType env (Let b e)
   where
     cheap_bind (NonRec b e) = is_cheap (b,e)
     cheap_bind (Rec prs)    = all is_cheap prs
-    is_cheap (b,e) = ae_cheap_fn env e (Just (idType b))
+    is_cheap (b,e) = ae_cheap_fn env e (Just (idType (unwrapBndr b)))
 
 arityType env (Tick t e)
   | not (tickishIsCode t)     = arityType env e
@@ -862,19 +864,26 @@ etaExpand :: Arity              -- ^ Result should have this number of value arg
 --
 -- It deals with coerces too, though they are now rare
 -- so perhaps the extra code isn't worth it
+etaExpand = etaExpandWith id
 
-etaExpand n orig_expr
+etaExpandWith :: WrappedBndr b
+              => (CoreBndr -> b)
+              -> Arity
+              -> Expr b
+              -> Expr b
+etaExpandWith wrap n orig_expr
   = go n orig_expr
   where
       -- Strip off existing lambdas and casts
       -- Note [Eta expansion and SCCs]
     go 0 expr = expr
-    go n (Lam v body) | isTyVar v = Lam v (go n     body)
+    go n (Lam v body) | is_ty_var = Lam v (go n     body)
                       | otherwise = Lam v (go (n-1) body)
+      where is_ty_var = isTyVar (unwrapBndr v)
     go n (Cast expr co)           = Cast (go n expr) co
     go n expr
       = -- pprTrace "ee" (vcat [ppr orig_expr, ppr expr, ppr etas]) $
-        retick $ etaInfoAbs etas (etaInfoApp subst' sexpr etas)
+        retick $ etaInfoAbs wrap etas (etaInfoApp subst' sexpr etas)
       where
           in_scope = mkInScopeSet (exprFreeVars expr)
           (in_scope', etas) = mkEtaWW n orig_expr in_scope (exprType expr)
@@ -907,13 +916,13 @@ pushCoercion co1 (EtaCo co2 : eis)
 pushCoercion co eis = EtaCo co : eis
 
 --------------
-etaInfoAbs :: [EtaInfo] -> CoreExpr -> CoreExpr
-etaInfoAbs []               expr = expr
-etaInfoAbs (EtaVar v : eis) expr = Lam v (etaInfoAbs eis expr)
-etaInfoAbs (EtaCo co : eis) expr = Cast (etaInfoAbs eis expr) (mkSymCo co)
+etaInfoAbs :: (CoreBndr -> b) -> [EtaInfo] -> Expr b -> Expr b
+etaInfoAbs _    []               expr = expr
+etaInfoAbs wrap (EtaVar v : eis) expr = Lam (wrap v) (etaInfoAbs wrap eis expr)
+etaInfoAbs wrap (EtaCo co : eis) expr = Cast (etaInfoAbs wrap eis expr) (mkSymCo co)
 
 --------------
-etaInfoApp :: Subst -> CoreExpr -> [EtaInfo] -> CoreExpr
+etaInfoApp :: WrappedBndr b => SubstFor b -> Expr b -> [EtaInfo] -> Expr b
 -- (etaInfoApp s e eis) returns something equivalent to
 --             ((substExpr s e) `appliedto` eis)
 
@@ -935,7 +944,7 @@ etaInfoApp subst (Case e b ty alts) eis
                  (subst2,bs') = substBndrs subst1 bs
 
     mk_alts_ty ty []               = ty
-    mk_alts_ty ty (EtaVar v : eis) = mk_alts_ty (applyTypeToArg ty (varToCoreExpr v)) eis
+    mk_alts_ty ty (EtaVar v : eis) = mk_alts_ty (applyTypeToArg ty (varToCoreExpr v :: CoreExpr)) eis
     mk_alts_ty _  (EtaCo co : eis) = mk_alts_ty (pSnd (coercionKind co)) eis
 
 etaInfoApp subst (Let b e) eis
@@ -954,7 +963,7 @@ etaInfoApp subst e eis
     go e (EtaCo co    : eis) = go (Cast e co) eis
 
 --------------
-mkEtaWW :: Arity -> CoreExpr -> InScopeSet -> Type
+mkEtaWW :: OutputableBndr b => Arity -> Expr b -> InScopeSet -> Type
         -> (InScopeSet, [EtaInfo])
         -- EtaInfo contains fresh variables,
         --   not free in the incoming CoreExpr
@@ -1001,10 +1010,10 @@ mkEtaWW orig_n orig_expr in_scope orig_ty
 --------------
 -- Avoiding unnecessary substitution; use short-cutting versions
 
-subst_expr :: Subst -> CoreExpr -> CoreExpr
+subst_expr :: WrappedBndr b => SubstFor b -> Expr b -> Expr b
 subst_expr = substExprSC (text "CoreArity:substExpr")
 
-subst_bind :: Subst -> CoreBind -> (Subst, CoreBind)
+subst_bind :: WrappedBndr b => SubstFor b -> Bind b -> (SubstFor b, Bind b)
 subst_bind = substBindSC
 
 

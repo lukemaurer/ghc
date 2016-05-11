@@ -3,7 +3,7 @@
 (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor #-}
+{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, FlexibleContexts #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -47,6 +47,7 @@ module CoreSyn (
 
         -- ** Mapping over binders
         WrappedBndr(..), mapExpr, mapBind, mapAlt,
+        isIdBndr, isTyBndr, isCoBndr,
         
         -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
@@ -91,6 +92,8 @@ module CoreSyn (
     ) where
 
 #include "HsVersions.h"
+
+import {-# SOURCE #-} PprCore ()
 
 import CostCentre
 import VarEnv( InScopeSet )
@@ -1442,9 +1445,15 @@ mapAlt f (con, bndrs, rhs) = (con, map f bndrs, mapExpr f rhs)
 -- polymorphism over AST binder annotations. 'CoreBndr' itself is trivially
 -- a member, with specialized implementations of unwrapping functions as
 -- (more efficient) identity functions.
-class WrappedBndr b where
+--
+-- Has 'OutputableBndr' as a superclass to allow use of 'pprPanic', 'pprTrace',
+-- etc., without needing to change a bunch of types.
+class OutputableBndr b => WrappedBndr b where
   -- | Remove the wrapper around a binder.
   unwrapBndr :: b -> CoreBndr
+  
+  -- | Change the wrapped binder, as might happen by substitution.
+  rewrapBndr :: b -> CoreBndr -> b
   
   -- | Remove the wrapper around all binders in a list.
   unwrapBndrs       :: [b]    -> [CoreBndr]
@@ -1463,11 +1472,18 @@ class WrappedBndr b where
 -- | Trivial instance of 'WrappedBndr' for plain binders. All "unwrapping"
 -- functions are identities.
 instance WrappedBndr Var where
-  unwrapBndr  b  = b
-  unwrapBndrs bs = bs
+  unwrapBndr  b   = b
+  unwrapBndrs bs  = bs
   unwrapBndrsInExpr expr = expr
   unwrapBndrsInBind bind = bind
   unwrapBndrsInAlt  alt  = alt
+  
+  rewrapBndr _ b = b
+
+isIdBndr, isTyBndr, isCoBndr :: WrappedBndr b => b -> Bool
+isIdBndr = isId    . unwrapBndr
+isTyBndr = isTyVar . unwrapBndr
+isCoBndr = isCoVar . unwrapBndr
 
 {-
 ************************************************************************
@@ -1485,8 +1501,9 @@ type TaggedExpr t = Expr (TaggedBndr t)
 type TaggedArg  t = Arg  (TaggedBndr t)
 type TaggedAlt  t = Alt  (TaggedBndr t)
 
-instance WrappedBndr (TaggedBndr t) where
-  unwrapBndr (TB t _) = t
+instance Outputable t => WrappedBndr (TaggedBndr t) where
+  unwrapBndr (TB b _) = b
+  rewrapBndr (TB _ t) b = TB b t
 
 instance Outputable b => Outputable (TaggedBndr b) where
   ppr (TB b l) = char '<' <> ppr b <> comma <> ppr l <> char '>'
@@ -1497,7 +1514,7 @@ instance Outputable b => OutputableBndr (TaggedBndr b) where
   pprPrefixOcc b = ppr b
 
 deTagExpr :: TaggedExpr t -> CoreExpr
-deTagExpr = unwrapBndrsInExpr
+deTagExpr = mapExpr (\(TB b _) -> b)
 
 {-
 ************************************************************************
@@ -1616,12 +1633,12 @@ mkCoBind :: CoVar -> Coercion -> CoreBind
 mkCoBind cv co      = NonRec cv (Coercion co)
 
 -- | Convert a binder into either a 'Var' or 'Type' 'Expr' appropriately
-varToCoreExpr :: CoreBndr -> Expr b
+varToCoreExpr :: Var -> Expr b
 varToCoreExpr v | isTyVar v = Type (mkTyVarTy v)
                 | isCoVar v = Coercion (mkCoVarCo v)
                 | otherwise = ASSERT( isId v ) Var v
 
-varsToCoreExprs :: [CoreBndr] -> [Expr b]
+varsToCoreExprs :: [Var] -> [Expr b]
 varsToCoreExprs vs = map varToCoreExpr vs
 
 {-
@@ -1635,19 +1652,19 @@ These are defined here to avoid a module loop between CoreUtils and CoreFVs
 
 -}
 
-applyTypeToArg :: Type -> CoreExpr -> Type
+applyTypeToArg :: Type -> Expr b -> Type
 -- ^ Determines the type resulting from applying an expression with given type
 -- to a given argument expression
 applyTypeToArg fun_ty arg = piResultTy fun_ty (exprToType arg)
 
 -- | If the expression is a 'Type', converts. Otherwise,
 -- panics. NB: This does /not/ convert 'Coercion' to 'CoercionTy'.
-exprToType :: CoreExpr -> Type
+exprToType :: Expr b -> Type
 exprToType (Type ty)     = ty
 exprToType _bad          = pprPanic "exprToType" empty
 
 -- | If the expression is a 'Coercion', converts.
-exprToCoercion_maybe :: CoreExpr -> Maybe Coercion
+exprToCoercion_maybe :: Expr b -> Maybe Coercion
 exprToCoercion_maybe (Coercion co) = Just co
 exprToCoercion_maybe _             = Nothing
 
@@ -1692,7 +1709,7 @@ collectBinders               :: Expr b -> ([b],         Expr b)
 -- forall (a :: *) (b :: Foo ~ Bar) (c :: *). Baz -> forall (d :: *). Blob
 -- will pull out the binders for a, b, c, and Baz, but not for d or anything
 -- within Blob. This is to coordinate with tcSplitSigmaTy.
-collectTyAndValBinders       :: CoreExpr -> ([TyVar], [Id], CoreExpr)
+collectTyAndValBinders       :: WrappedBndr b => Expr b -> ([b], [b], Expr b)
 
 collectBinders expr
   = go [] expr
@@ -1703,12 +1720,12 @@ collectBinders expr
 collectTyAndValBinders expr
   = go_forall [] [] expr
   where go_forall tvs ids (Lam b e)
-          | isTyVar b       = go_forall (b:tvs) ids e
-          | isCoVar b       = go_forall tvs (b:ids) e
+          | isTyBndr b      = go_forall (b:tvs) ids e
+          | isCoBndr b      = go_forall tvs (b:ids) e
         go_forall tvs ids e = go_fun tvs ids e
 
         go_fun tvs ids (Lam b e)
-          | isId b          = go_fun tvs (b:ids) e
+          | isIdBndr b      = go_fun tvs (b:ids) e
         go_fun tvs ids e    = (reverse tvs, reverse ids, e)
 
 -- | Takes a nested application expression and returns the the function
@@ -1747,11 +1764,11 @@ at runtime.  Similarly isRuntimeArg.
 -}
 
 -- | Will this variable exist at runtime?
-isRuntimeVar :: Var -> Bool
-isRuntimeVar = isId
+isRuntimeVar :: WrappedBndr b => b -> Bool
+isRuntimeVar = isId . unwrapBndr
 
 -- | Will this argument expression exist at runtime?
-isRuntimeArg :: CoreExpr -> Bool
+isRuntimeArg :: Expr b -> Bool
 isRuntimeArg = isValArg
 
 -- | Returns @True@ for value arguments, false for type args
@@ -1774,8 +1791,8 @@ isTypeArg (Type {}) = True
 isTypeArg _         = False
 
 -- | The number of binders that bind values rather than types
-valBndrCount :: [CoreBndr] -> Int
-valBndrCount = count isId
+valBndrCount :: WrappedBndr b => [b] -> Int
+valBndrCount = count isId . unwrapBndrs
 
 -- | The number of argument expressions that are values rather than types at their top level
 valArgCount :: [Arg b] -> Int

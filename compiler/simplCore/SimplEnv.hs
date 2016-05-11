@@ -8,8 +8,8 @@
 
 module SimplEnv (
         -- * Basic types
-        InId, InBind, InExpr, InAlt, InArg, InType, InBndr, InVar,
-        OutId, OutTyVar, OutBind, OutExpr, OutAlt, OutArg, OutType, OutBndr, OutVar,
+        InId, InBind, InExpr, InAlt, InArg, InType, InBndr, InVar, InIdBndr,
+        OutId, OutTyVar, OutBind, OutExpr, OutAlt, OutArg, OutType, OutBndr, OutVar, OutIdBndr,
         InCoercion, OutCoercion,
 
         -- * The simplifier mode
@@ -44,6 +44,7 @@ import SimplMonad
 import CoreMonad                ( SimplifierMode(..) )
 import CoreSyn
 import CoreUtils
+import CoreJoins
 import Var
 import VarEnv
 import VarSet
@@ -70,26 +71,28 @@ import Data.List
 ************************************************************************
 -}
 
-type InBndr     = CoreBndr
+type InBndr     = SortedBndr
+type InIdBndr   = SortedBndr
 type InVar      = Var                   -- Not yet cloned
 type InId       = Id                    -- Not yet cloned
 type InType     = Type                  -- Ditto
-type InBind     = CoreBind
-type InExpr     = CoreExpr
-type InAlt      = CoreAlt
-type InArg      = CoreArg
+type InBind     = BindWithJoins
+type InExpr     = ExprWithJoins
+type InAlt      = AltWithJoins
+type InArg      = ExprWithJoins
 type InCoercion = Coercion
 
-type OutBndr     = CoreBndr
+type OutBndr     = SortedBndr
+type OutIdBndr   = SortedBndr
 type OutVar      = Var                  -- Cloned
 type OutId       = Id                   -- Cloned
 type OutTyVar    = TyVar                -- Cloned
 type OutType     = Type                 -- Cloned
 type OutCoercion = Coercion
-type OutBind     = CoreBind
-type OutExpr     = CoreExpr
-type OutAlt      = CoreAlt
-type OutArg      = CoreArg
+type OutBind     = BindWithJoins
+type OutExpr     = ExprWithJoins
+type OutAlt      = AltWithJoins
+type OutArg      = ExprWithJoins
 
 {-
 ************************************************************************
@@ -120,6 +123,7 @@ data SimplEnv
         -- They are all OutVars, and all bound in this module
         seInScope   :: InScopeSet,      -- OutVars only
                 -- Includes all variables bound by seFloats
+        seJoins     :: IdSet,           -- Which OutVars are join variables?
         seFloats    :: Floats
                 -- See Note [Simplifier floats]
     }
@@ -132,7 +136,8 @@ pprSimplEnv env
   = vcat [text "TvSubst:" <+> ppr (seTvSubst env),
           text "CvSubst:" <+> ppr (seCvSubst env),
           text "IdSubst:" <+> ppr (seIdSubst env),
-          text "InScope:" <+> vcat (map ppr_one in_scope_vars)
+          text "InScope:" <+> vcat (map ppr_one in_scope_vars),
+          text "Joins:  " <+> sep (map ppr (varSetElems (seJoins env)))
     ]
   where
    in_scope_vars = varEnvElts (getInScopeVars (seInScope env))
@@ -231,6 +236,7 @@ mkSimplEnv :: SimplifierMode -> SimplEnv
 mkSimplEnv mode
   = SimplEnv { seMode = mode
              , seInScope = init_in_scope
+             , seJoins   = emptyVarSet
              , seFloats = emptyFloats
              , seTvSubst = emptyVarEnv
              , seCvSubst = emptyVarEnv
@@ -271,18 +277,18 @@ updMode :: (SimplifierMode -> SimplifierMode) -> SimplEnv -> SimplEnv
 updMode upd env = env { seMode = upd (seMode env) }
 
 ---------------------
-extendIdSubst :: SimplEnv -> Id -> SimplSR -> SimplEnv
-extendIdSubst env@(SimplEnv {seIdSubst = subst}) var res
+extendIdSubst :: SimplEnv -> InBndr -> SimplSR -> SimplEnv
+extendIdSubst env@(SimplEnv {seIdSubst = subst}) (SB var _) res
   = ASSERT2( isId var && not (isCoVar var), ppr var )
     env {seIdSubst = extendVarEnv subst var res}
 
-extendTvSubst :: SimplEnv -> TyVar -> Type -> SimplEnv
-extendTvSubst env@(SimplEnv {seTvSubst = tsubst}) var res
+extendTvSubst :: SimplEnv -> InBndr -> Type -> SimplEnv
+extendTvSubst env@(SimplEnv {seTvSubst = tsubst}) (SB var _) res
   = ASSERT( isTyVar var )
     env {seTvSubst = extendVarEnv tsubst var res}
 
-extendCvSubst :: SimplEnv -> CoVar -> Coercion -> SimplEnv
-extendCvSubst env@(SimplEnv {seCvSubst = csubst}) var co
+extendCvSubst :: SimplEnv -> InBndr -> Coercion -> SimplEnv
+extendCvSubst env@(SimplEnv {seCvSubst = csubst}) (SB var _) co
   = ASSERT( isCoVar var )
     env {seCvSubst = extendVarEnv csubst var co}
 
@@ -305,23 +311,27 @@ setFloats env env_with_floats
   = env { seInScope = seInScope env_with_floats,
           seFloats  = seFloats  env_with_floats }
 
-addNewInScopeIds :: SimplEnv -> [CoreBndr] -> SimplEnv
+addNewInScopeIds :: SimplEnv -> [SortedBndr] -> SimplEnv
         -- The new Ids are guaranteed to be freshly allocated
-addNewInScopeIds env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst }) vs
-  = env { seInScope = in_scope `extendInScopeSetList` vs,
-          seIdSubst = id_subst `delVarEnvList` vs }
+addNewInScopeIds env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst
+                               , seJoins = joins }) vs
+  = env { seInScope = in_scope `extendInScopeSetList` unwrapBndrs vs,
+          seJoins   = joins `extendVarSetList` [ v | SB v JoinBndr <- vs ],
+          seIdSubst = id_subst `delVarEnvList` unwrapBndrs vs }
         -- Why delete?  Consider
         --      let x = a*b in (x, \x -> x+3)
         -- We add [x |-> a*b] to the substitution, but we must
         -- _delete_ it from the substitution when going inside
         -- the (\x -> ...)!
 
-modifyInScope :: SimplEnv -> CoreBndr -> SimplEnv
+modifyInScope :: SimplEnv -> SortedBndr -> SimplEnv
 -- The variable should already be in scope, but
 -- replace the existing version with this new one
 -- which has more information
-modifyInScope env@(SimplEnv {seInScope = in_scope}) v
-  = env {seInScope = extendInScopeSet in_scope v}
+modifyInScope env@(SimplEnv {seInScope = in_scope, seJoins = joins}) (SB v sort)
+  = env { seInScope = extendInScopeSet in_scope v
+        , seJoins   = if sort == ValBndr then extendVarSet joins v
+                                         else delVarSet joins v }
 
 ---------------------
 zapSubstEnv :: SimplEnv -> SimplEnv
@@ -426,29 +436,34 @@ unitFloat :: OutBind -> Floats
 unitFloat bind = Floats (unitOL bind) (flag bind)
   where
     flag (Rec {})                = FltLifted
-    flag (NonRec bndr rhs)
+    flag (NonRec sbndr rhs)
       | not (isStrictId bndr)    = FltLifted
       | exprOkForSpeculation rhs = FltOkSpec  -- Unlifted, and lifted but ok-for-spec (eg HNF)
-      | otherwise                = ASSERT2( not (isUnliftedType (idType bndr)), ppr bndr )
+      | otherwise                = ASSERT2( not (isUnliftedType (idType bndr)), ppr sbndr )
                                    FltCareful
       -- Unlifted binders can only be let-bound if exprOkForSpeculation holds
+      where
+        bndr = sbBndr sbndr
 
-addNonRec :: SimplEnv -> OutId -> OutExpr -> SimplEnv
+addNonRec :: SimplEnv -> OutBndr -> OutExpr -> SimplEnv
 -- Add a non-recursive binding and extend the in-scope set
 -- The latter is important; the binder may already be in the
 -- in-scope set (although it might also have been created with newId)
 -- but it may now have more IdInfo
 addNonRec env id rhs
-  = id `seq`   -- This seq forces the Id, and hence its IdInfo,
-               -- and hence any inner substitutions
+  = sbBndr id `seq`   -- This seq forces the Id, and hence its IdInfo,
+                      -- and hence any inner substitutions
     env { seFloats = seFloats env `addFlts` unitFloat (NonRec id rhs),
-          seInScope = extendInScopeSet (seInScope env) id }
+          seInScope = extendInScopeSet (seInScope env) (sbBndr id),
+          seJoins = if isJoinBndr id then extendVarSet (seJoins env) (sbBndr id)
+                                     else seJoins env }
 
 extendFloats :: SimplEnv -> OutBind -> SimplEnv
 -- Add these bindings to the floats, and extend the in-scope env too
 extendFloats env bind
   = env { seFloats  = seFloats env `addFlts` unitFloat bind,
-          seInScope = extendInScopeSetList (seInScope env) bndrs }
+          seInScope = extendInScopeSetList (seInScope env) (unwrapBndrs bndrs),
+          seJoins = extendVarSetList (seJoins env) [ bndr | SB bndr JoinBndr <- bndrs ] }
   where
     bndrs = bindersOf bind
 
@@ -482,7 +497,7 @@ wrapFloats :: SimplEnv -> OutExpr -> OutExpr
 wrapFloats (SimplEnv {seFloats = Floats bs _}) body
   = foldrOL Let body bs
 
-getFloatBinds :: SimplEnv -> [CoreBind]
+getFloatBinds :: SimplEnv -> [OutBind]
 getFloatBinds (SimplEnv {seFloats = Floats bs _})
   = fromOL bs
 
@@ -490,7 +505,7 @@ isEmptyFloats :: SimplEnv -> Bool
 isEmptyFloats (SimplEnv {seFloats = Floats bs _})
   = isNilOL bs
 
-mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
+mapFloats :: SimplEnv -> ((OutBndr,OutExpr) -> (OutBndr,OutExpr)) -> SimplEnv
 mapFloats env@SimplEnv { seFloats = Floats fs ff } fun
    = env { seFloats = Floats (mapOL app fs) ff }
    where
@@ -535,14 +550,14 @@ refineFromInScope in_scope v
                   Nothing -> WARN( True, ppr v ) v  -- This is an error!
   | otherwise = v
 
-lookupRecBndr :: SimplEnv -> InId -> OutId
+lookupRecBndr :: SimplEnv -> InIdBndr -> OutIdBndr
 -- Look up an Id which has been put into the envt by simplRecBndrs,
 -- but where we have not yet done its RHS
-lookupRecBndr (SimplEnv { seInScope = in_scope, seIdSubst = ids }) v
+lookupRecBndr (SimplEnv { seInScope = in_scope, seIdSubst = ids }) (SB v sort)
   = case lookupVarEnv ids v of
-        Just (DoneId v) -> v
+        Just (DoneId v) -> SB v sort
         Just _ -> pprPanic "lookupRecBndr" (ppr v)
-        Nothing -> refineFromInScope in_scope v
+        Nothing -> SB (refineFromInScope in_scope v) sort
 
 {-
 ************************************************************************
@@ -566,10 +581,12 @@ simplBinder :: SimplEnv -> InBndr -> SimplM (SimplEnv, OutBndr)
 -- The substitution is extended only if the variable is cloned, because
 -- we *don't* need to use it to track occurrence info.
 simplBinder env bndr
-  | isTyVar bndr  = do  { let (env', tv) = substTyVarBndr env bndr
+  | is_ty_var     = do  { let (env', tv) = substTyVarBndr env bndr
                         ; seqTyVar tv `seq` return (env', tv) }
   | otherwise     = do  { let (env', id) = substIdBndr env bndr
                         ; seqId id `seq` return (env', id) }
+  where
+    is_ty_var = isTyVar (sbBndr bndr)
 
 ---------------
 simplNonRecBndr :: SimplEnv -> InBndr -> SimplM (SimplEnv, OutBndr)
@@ -589,8 +606,10 @@ simplRecBndrs env@(SimplEnv {}) ids
 substIdBndr :: SimplEnv -> InBndr -> (SimplEnv, OutBndr)
 -- Might be a coercion variable
 substIdBndr env bndr
-  | isCoVar bndr  = substCoVarBndr env bndr
+  | is_co_var     = substCoVarBndr env bndr
   | otherwise     = substNonCoVarIdBndr env bndr
+  where
+    is_co_var = isCoVar (sbBndr bndr)
 
 ---------------
 substNonCoVarIdBndr
@@ -614,11 +633,13 @@ substNonCoVarIdBndr
 -- Similar to CoreSubst.substIdBndr, except that
 --      the type of id_subst differs
 --      all fragile info is zapped
-substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst })
-                    old_id
+substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst,
+                                    seJoins   = joins })
+                    (SB old_id sort)
   = ASSERT2( not (isCoVar old_id), ppr old_id )
     (env { seInScope = in_scope `extendInScopeSet` new_id,
-           seIdSubst = new_subst }, new_id)
+           seJoins   = new_joins,
+           seIdSubst = new_subst }, SB new_id sort)
   where
     id1    = uniqAway in_scope old_id
     id2    = substIdType env id1
@@ -632,17 +653,21 @@ substNonCoVarIdBndr env@(SimplEnv { seInScope = in_scope, seIdSubst = id_subst }
               = extendVarEnv id_subst old_id (DoneId new_id)
               | otherwise
               = delVarEnv id_subst old_id
+    new_joins | sort == ValBndr
+              = joins
+              | otherwise
+              = extendVarSet joins new_id
 
 ------------------------------------
-seqTyVar :: TyVar -> ()
+seqTyVar :: SortedTyBndr -> ()
 seqTyVar b = b `seq` ()
 
-seqId :: Id -> ()
-seqId id = seqType (idType id)  `seq`
-           idInfo id            `seq`
-           ()
+seqId :: SortedIdBndr -> ()
+seqId (SB id _) = seqType (idType id)  `seq`
+                  idInfo id            `seq`
+                  ()
 
-seqIds :: [Id] -> ()
+seqIds :: [SortedIdBndr] -> ()
 seqIds []       = ()
 seqIds (id:ids) = seqId id `seq` seqIds ids
 
@@ -702,20 +727,22 @@ substTy env ty = Type.substTy (getTCvSubst env) ty
 substTyVar :: SimplEnv -> TyVar -> Type
 substTyVar env tv = Type.substTyVar (getTCvSubst env) tv
 
-substTyVarBndr :: SimplEnv -> TyVar -> (SimplEnv, TyVar)
+substTyVarBndr :: SimplEnv -> SortedTyBndr -> (SimplEnv, SortedTyBndr)
 substTyVarBndr env tv
-  = case Type.substTyVarBndr (getTCvSubst env) tv of
+  = ASSERT(isValBndr tv)
+    case Type.substTyVarBndr (getTCvSubst env) (sbBndr tv) of
         (TCvSubst in_scope' tv_env' cv_env', tv')
-           -> (env { seInScope = in_scope', seTvSubst = tv_env', seCvSubst = cv_env' }, tv')
+           -> (env { seInScope = in_scope', seTvSubst = tv_env', seCvSubst = cv_env' }, SB tv' ValBndr)
 
 substCoVar :: SimplEnv -> CoVar -> Coercion
 substCoVar env tv = Coercion.substCoVar (getTCvSubst env) tv
 
-substCoVarBndr :: SimplEnv -> CoVar -> (SimplEnv, CoVar)
+substCoVarBndr :: SimplEnv -> SortedCoBndr -> (SimplEnv, SortedCoBndr)
 substCoVarBndr env cv
-  = case Coercion.substCoVarBndr (getTCvSubst env) cv of
+  = ASSERT(isValBndr cv)
+    case Coercion.substCoVarBndr (getTCvSubst env) (sbBndr cv) of
         (TCvSubst in_scope' tv_env' cv_env', cv')
-           -> (env { seInScope = in_scope', seTvSubst = tv_env', seCvSubst = cv_env' }, cv')
+           -> (env { seInScope = in_scope', seTvSubst = tv_env', seCvSubst = cv_env' }, SB cv' ValBndr)
 
 substCo :: SimplEnv -> Coercion -> Coercion
 substCo env co = Coercion.substCo (getTCvSubst env) co

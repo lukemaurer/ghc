@@ -45,6 +45,7 @@ import CoreFVs
 import CoreUtils
 import CoreArity
 import CoreUnfold
+import CoreJoins
 import Name
 import Id
 import Var
@@ -122,7 +123,7 @@ data SimplCont
 
   | Select {           -- case <hole> of alts
         sc_dup  :: DupFlag,                 -- See Note [DupFlag invariants]
-        sc_bndr :: InId,                    -- case binder
+        sc_bndr :: InIdBndr,                -- case binder
         sc_alts :: [InAlt],                 -- Alternatives
         sc_env  ::  StaticEnv,              --   and their static environment
         sc_cont :: SimplCont }
@@ -246,7 +247,7 @@ instance Outputable ArgSpec where
 
 addValArgTo :: ArgInfo -> OutExpr -> ArgInfo
 addValArgTo ai arg = ai { ai_args = ValArg arg : ai_args ai
-                        , ai_type = applyTypeToArg (ai_type ai) arg }
+                        , ai_type = applyTypeToArg (ai_type ai) (unwrapBndrsInExpr arg) }
 
 addTyArgTo :: ArgInfo -> OutType -> ArgInfo
 addTyArgTo ai arg_ty = ai { ai_args = arg_spec : ai_args ai
@@ -356,7 +357,7 @@ contHoleType (ApplyToVal { sc_arg = e, sc_env = se, sc_dup = dup, sc_cont = k })
   = mkFunTy (perhapsSubstTy dup se (exprType e))
             (contHoleType k)
 contHoleType (Select { sc_dup = d, sc_bndr =  b, sc_env = se })
-  = perhapsSubstTy d se (idType b)
+  = perhapsSubstTy d se (idType (unwrapBndr b))
 
 -------------------
 countValArgs :: SimplCont -> Int
@@ -619,7 +620,7 @@ rule for (*) (df d) can fire.  To do this
   b) we say that a con-like argument (eg (df d)) is interesting
 -}
 
-interestingArg :: SimplEnv -> CoreExpr -> ArgSummary
+interestingArg :: SimplEnv -> ExprWithJoins -> ArgSummary
 -- See Note [Interesting arguments]
 interestingArg env e = go env 0 e
   where
@@ -640,7 +641,7 @@ interestingArg env e = go env 0 e
     go env n (Tick _ a)        = go env n a
     go env n (Cast e _)        = go env n e
     go env n (Lam v e)
-       | isTyVar v             = go env n e
+       | isTyVar (sbBndr v)    = go env n e
        | n>0                   = NonTrivArg     -- (\x.b) e   is NonTriv
        | otherwise             = ValueArg
     go _ _ (Case {})           = NonTrivArg
@@ -1018,12 +1019,12 @@ is a term (not a coercion) so we can't necessarily inline the latter in
 the former.
 -}
 
-preInlineUnconditionally :: DynFlags -> SimplEnv -> TopLevelFlag -> InId -> InExpr -> Bool
+preInlineUnconditionally :: DynFlags -> SimplEnv -> TopLevelFlag -> InBndr -> InExpr -> Bool
 -- Precondition: rhs satisfies the let/app invariant
 -- See Note [CoreSyn let/app invariant] in CoreSyn
 -- Reason: we don't want to inline single uses, or discard dead bindings,
 --         for unlifted, side-effect-ful bindings
-preInlineUnconditionally dflags env top_lvl bndr rhs
+preInlineUnconditionally dflags env top_lvl (SB bndr _sort) rhs
   | not active                               = False
   | isStableUnfolding (idUnfolding bndr)     = False -- Note [Stable unfoldings and preInlineUnconditionally]
   | isTopLevel top_lvl && isBottomingId bndr = False -- Note [Top-level bottoming Ids]
@@ -1064,7 +1065,7 @@ preInlineUnconditionally dflags env top_lvl bndr rhs
         -- so substituting rhs inside a lambda doesn't change the occ info.
         -- Sadly, not quite the same as exprIsHNF.
     canInlineInLam (Lit _)    = True
-    canInlineInLam (Lam b e)  = isRuntimeVar b || canInlineInLam e
+    canInlineInLam (Lam b e)  = isRuntimeVar (sbBndr b) || canInlineInLam e
     canInlineInLam (Tick t e) = not (tickishIsCode t) && canInlineInLam e
     canInlineInLam _          = False
       -- not ticks.  Counting ticks cannot be duplicated, and non-counting
@@ -1277,10 +1278,10 @@ mkLam bndrs body cont
       | not (any bad bndrs)
         -- Note [Casts and lambdas]
       = do { lam <- mkLam' dflags bndrs body
-           ; return (mkCast lam (mkPiCos Representational bndrs co)) }
+           ; return (mkCast lam (mkPiCos Representational (unwrapBndrs bndrs) co)) }
       where
-        co_vars  = tyCoVarsOfCo co
-        bad bndr = isCoVar bndr && bndr `elemVarSet` co_vars
+        co_vars         = tyCoVarsOfCo co
+        bad (SB bndr _) = isCoVar bndr && bndr `elemVarSet` co_vars
 
     mkLam' dflags bndrs body@(Lam {})
       = mkLam' dflags (bndrs ++ bndrs1) body1
@@ -1294,7 +1295,7 @@ mkLam bndrs body cont
     mkLam' dflags bndrs body
       | gopt Opt_DoEtaReduction dflags
       , Just etad_lam <- tryEtaReduce bndrs body
-      = do { tick (EtaReduction (head bndrs))
+      = do { tick (EtaReduction (unwrapBndr (head bndrs)))
            ; return etad_lam }
 
       | not (contIsRhs cont)   -- See Note [Eta-expanding lambdas]
@@ -1302,8 +1303,8 @@ mkLam bndrs body cont
       , any isRuntimeVar bndrs
       , let body_arity = exprEtaExpandArity dflags body
       , body_arity > 0
-      = do { tick (EtaExpansion (head bndrs))
-           ; let res = mkLams bndrs (etaExpand body_arity body)
+      = do { tick (EtaExpansion (unwrapBndr (head bndrs)))
+           ; let res = mkLams bndrs (etaExpandWith asValBndr body_arity body)
            ; traceSmpl "eta expand" (vcat [text "before" <+> ppr (mkLams bndrs body)
                                           , text "after" <+> ppr res])
            ; return res }
@@ -1391,7 +1392,7 @@ tryEtaExpandRhs env bndr rhs
             new_arity  = max new_arity1 new_arity2
       , new_arity > old_arity      -- And the current manifest arity isn't enough
       = do { tick (EtaExpansion bndr)
-           ; return (new_arity, etaExpand new_arity rhs) }
+           ; return (new_arity, etaExpandWith asValBndr new_arity rhs) }
       | otherwise
       = return (old_arity, rhs)
 
@@ -1553,20 +1554,21 @@ new binding is abstracted.  Note that
     which is obviously bogus.
 -}
 
-abstractFloats :: [OutTyVar] -> SimplEnv -> OutExpr -> SimplM ([OutBind], OutExpr)
+abstractFloats :: [OutBndr] -> SimplEnv -> OutExpr -> SimplM ([OutBind], OutExpr)
 abstractFloats main_tvs body_env body
   = ASSERT( notNull body_floats )
     do  { (subst, float_binds) <- mapAccumLM abstract empty_subst body_floats
         ; return (float_binds, CoreSubst.substExpr (text "abstract_floats1") subst body) }
   where
-    main_tv_set = mkVarSet main_tvs
+    main_tv_set = mkVarSet (unwrapBndrs main_tvs)
     body_floats = getFloatBinds body_env
     empty_subst = CoreSubst.mkEmptySubst (seInScope body_env)
 
-    abstract :: CoreSubst.Subst -> OutBind -> SimplM (CoreSubst.Subst, OutBind)
+    abstract :: CoreSubst.SubstFor SortedBndr -> OutBind
+             -> SimplM (CoreSubst.SubstFor SortedBndr, OutBind)
     abstract subst (NonRec id rhs)
       = do { (poly_id, poly_app) <- mk_poly tvs_here id
-           ; let poly_rhs = mkLams tvs_here rhs'
+           ; let poly_rhs = mkLams (map asValBndr tvs_here) rhs'
                  subst'   = CoreSubst.extendIdSubst subst id poly_app
            ; return (subst', (NonRec poly_id poly_rhs)) }
       where
@@ -1581,7 +1583,8 @@ abstractFloats main_tvs body_env body
     abstract subst (Rec prs)
        = do { (poly_ids, poly_apps) <- mapAndUnzipM (mk_poly tvs_here) ids
             ; let subst' = CoreSubst.extendSubstList subst (ids `zip` poly_apps)
-                  poly_rhss = [mkLams tvs_here (CoreSubst.substExpr (text "abstract_floats3") subst' rhs)
+                  poly_rhss = [mkLams (map asValBndr tvs_here)
+                                      (CoreSubst.substExpr (text "abstract_floats3") subst' rhs)
                               | rhs <- rhss]
             ; return (subst', Rec (poly_ids `zip` poly_rhss)) }
        where
@@ -1599,15 +1602,17 @@ abstractFloats main_tvs body_env body
                 -- If you ever want to be more selective, remember this bizarre case too:
                 --      x::a = x
                 -- Here, we must abstract 'x' over 'a'.
-         tvs_here = toposortTyVars main_tvs
+         tvs_here = toposortTyVars (unwrapBndrs main_tvs)
 
-    mk_poly tvs_here var
+    mk_poly :: [TyVar] -> OutBndr -> SimplM (OutBndr, OutExpr)
+    mk_poly tvs_here bndr
       = do { uniq <- getUniqueM
-           ; let  poly_name = setNameUnique (idName var) uniq           -- Keep same name
+           ; let  var       = unwrapBndr bndr
+                  poly_name = setNameUnique (idName var) uniq           -- Keep same name
                   poly_ty   = mkInvForAllTys tvs_here (idType var) -- But new type of course
                   poly_id   = transferPolyIdInfo var tvs_here $ -- Note [transferPolyIdInfo] in Id.hs
                               mkLocalIdOrCoVar poly_name poly_ty
-           ; return (poly_id, mkTyApps (Var poly_id) (mkTyVarTys tvs_here)) }
+           ; return (asValBndr poly_id, mkTyApps (Var poly_id) (mkTyVarTys tvs_here)) }
                 -- In the olden days, it was crucial to copy the occInfo of the original var,
                 -- because we were looking at occurrence-analysed but as yet unsimplified code!
                 -- In particular, we mustn't lose the loop breakers.  BUT NOW we are looking
@@ -1700,21 +1705,21 @@ If we don't notice this, we may end up filtering out *all* the cases
 of the inner case y, which give us nowhere to go!
 -}
 
-prepareAlts :: OutExpr -> OutId -> [InAlt] -> SimplM ([AltCon], [InAlt])
+prepareAlts :: OutExpr -> OutIdBndr -> [InAlt] -> SimplM ([AltCon], [InAlt])
 -- The returned alternatives can be empty, none are possible
 prepareAlts scrut case_bndr' alts
-  | Just (tc, tys) <- splitTyConApp_maybe (varType case_bndr')
+  | Just (tc, tys) <- splitTyConApp_maybe (varType (unwrapBndr case_bndr'))
            -- Case binder is needed just for its type. Note that as an
            --   OutId, it has maximum information; this is important.
            --   Test simpl013 is an example
   = do { us <- getUniquesM
        ; let (idcs1, alts1)       = filterAlts tc tys imposs_cons alts
-             (yes2,  alts2)       = refineDefaultAlt us tc tys idcs1 alts1
+             (yes2,  alts2)       = refineDefaultAltWith asValBndr us tc tys idcs1 alts1
              (yes3, idcs3, alts3) = combineIdenticalAlts idcs1 alts2
              -- "idcs" stands for "impossible default data constructors"
              -- i.e. the constructors that can't match the default case
-       ; when yes2 $ tick (FillInCaseDefault case_bndr')
-       ; when yes3 $ tick (AltMerge case_bndr')
+       ; when yes2 $ tick (FillInCaseDefault (unwrapBndr case_bndr'))
+       ; when yes3 $ tick (AltMerge (unwrapBndr case_bndr'))
        ; return (idcs3, alts3) }
 
   | otherwise  -- Not a data type, so nothing interesting happens
@@ -1763,7 +1768,7 @@ mkCase tries these things
 
 mkCase, mkCase1, mkCase2
    :: DynFlags
-   -> OutExpr -> OutId
+   -> OutExpr -> OutBndr
    -> OutType -> [OutAlt]               -- Alternatives in standard (increasing) order
    -> SimplM OutExpr
 
@@ -1775,17 +1780,19 @@ mkCase dflags scrut outer_bndr alts_ty ((DEFAULT, _, deflt_rhs) : outer_alts)
   | gopt Opt_CaseMerge dflags
   , (ticks, Case (Var inner_scrut_var) inner_bndr _ inner_alts)
        <- stripTicksTop tickishFloatable deflt_rhs
-  , inner_scrut_var == outer_bndr
-  = do  { tick (CaseMerge outer_bndr)
+  , let outer_id = unwrapBndr outer_bndr
+  , inner_scrut_var == outer_id
+  = do  { tick (CaseMerge outer_id)
 
         ; let wrap_alt (con, args, rhs) = ASSERT( outer_bndr `notElem` args )
                                           (con, args, wrap_rhs rhs)
                 -- Simplifier's no-shadowing invariant should ensure
                 -- that outer_bndr is not shadowed by the inner patterns
-              wrap_rhs rhs = Let (NonRec inner_bndr (Var outer_bndr)) rhs
+              wrap_rhs rhs = Let (NonRec inner_bndr (Var outer_id)) rhs
                 -- The let is OK even for unboxed binders,
 
-              wrapped_alts | isDeadBinder inner_bndr = inner_alts
+              wrapped_alts | isDeadBinder (unwrapBndr inner_bndr) 
+                                                     = inner_alts
                            | otherwise               = map wrap_alt inner_alts
 
               merged_alts = mergeAlts outer_alts wrapped_alts
@@ -1815,27 +1822,29 @@ mkCase dflags scrut bndr alts_ty alts = mkCase1 dflags scrut bndr alts_ty alts
 
 mkCase1 _dflags scrut case_bndr _ alts@((_,_,rhs1) : _)      -- Identity case
   | all identity_alt alts
-  = do { tick (CaseIdentity case_bndr)
+  = do { tick (CaseIdentity (unwrapBndr case_bndr))
        ; return (mkTicks ticks $ re_cast scrut rhs1) }
   where
+    case_id = unwrapBndr case_bndr
     ticks = concatMap (stripTicksT tickishFloatable . thdOf3) (tail alts)
     identity_alt (con, args, rhs) = check_eq rhs con args
 
+    check_eq :: OutExpr -> AltCon -> [OutBndr] -> Bool
     check_eq (Cast rhs co) con        args
-      = not (any (`elemVarSet` tyCoVarsOfCo co) args) && check_eq rhs con args
+      = not (any (`elemVarSet` tyCoVarsOfCo co) (unwrapBndrs args)) && check_eq rhs con args
         -- See Note [RHS casts]
     check_eq (Lit lit)  (LitAlt lit') _    = lit == lit'
-    check_eq (Var v) _ _  | v == case_bndr = True
+    check_eq (Var v) _ _  | v == case_id   = True
     check_eq (Var v)    (DataAlt con) []   = v == dataConWorkId con
                                              -- Optimisation only
     check_eq (Tick t e) alt           args = tickishFloatable t &&
                                              check_eq e alt args
     check_eq rhs        (DataAlt con) args = cheapEqExpr' tickishFloatable rhs $
                                              mkConApp con (arg_tys ++
-                                                           varsToCoreExprs args)
+                                                           varsToCoreExprs (unwrapBndrs args))
     check_eq _          _             _    = False
 
-    arg_tys = map Type (tyConAppArgs (idType case_bndr))
+    arg_tys = map Type (tyConAppArgs (idType case_id))
 
         -- Note [RHS casts]
         -- ~~~~~~~~~~~~~~~~

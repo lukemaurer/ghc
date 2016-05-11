@@ -2,7 +2,9 @@
 
 module CoreJoins (findJoinsInPgm, findJoinsInExpr,
   eraseJoins, lintJoinsInCoreBindings,
-  SortedBndr(..), BndrSort(..), isJoinBndr, isValBndr, sbSort, sbBndr,
+  SortedBndr(..), BndrSort(..),
+  isValBndr, isJoinBndr, asValBndr, asJoinBndr, sbSort, sbBndr, onBndr,
+  SortedTyBndr, SortedCoBndr, SortedIdBndr,
   ExprWithJoins, BindWithJoins, AltWithJoins, ProgramWithJoins) where
 
 import CoreSyn
@@ -19,22 +21,34 @@ import Control.Monad
 #include "HsVersions.h"
 
 data BndrSort   = ValBndr | JoinBndr deriving (Eq)
-data SortedBndr = SB CoreBndr BndrSort
+data SortedBndr = SB CoreBndr BndrSort deriving (Eq)
   -- Could be TaggedBndr, but shouldn't think of the sort as a tag but as
   -- essential information
 
+type SortedTyBndr = SortedBndr -- must be ValBndr
+type SortedCoBndr = SortedBndr -- must be ValBndr
+type SortedIdBndr = SortedBndr
+
 instance WrappedBndr SortedBndr where
   unwrapBndr (SB bndr _) = bndr
+  rewrapBndr (SB _ sort) bndr = SB bndr sort
 
 isJoinBndr, isValBndr :: SortedBndr -> Bool
 isJoinBndr = (== JoinBndr) . sbSort
 isValBndr  = (== ValBndr)  . sbSort
+
+asValBndr, asJoinBndr :: CoreBndr -> SortedBndr
+asValBndr  id = SB id ValBndr
+asJoinBndr id = SB id JoinBndr
 
 sbSort :: SortedBndr -> BndrSort
 sbSort (SB _bndr sort) = sort
 
 sbBndr :: SortedBndr -> CoreBndr
 sbBndr (SB bndr _sort) = bndr
+
+onBndr :: (CoreBndr -> CoreBndr) -> SortedBndr -> SortedBndr
+onBndr f (SB bndr sort) = SB (f bndr) sort
 
 type ExprWithJoins    = Expr SortedBndr
 type BindWithJoins    = Bind SortedBndr

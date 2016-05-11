@@ -1507,6 +1507,11 @@ data BSilt
   = BoringB
   | CloB FISilt
 
+instance Outputable BSilt
+  where
+    ppr BoringB = empty
+    ppr (CloB silt) = ppr silt
+
 type CoreBindWithBoth = AnnBind InVar (DVarSet,FISilt)
 type CoreExprWithBoth = AnnExpr InVar (DVarSet,FISilt)
 type CoreAltWithBoth  = AnnAlt  InVar (DVarSet,FISilt)
