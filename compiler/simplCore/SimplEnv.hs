@@ -36,17 +36,18 @@ module SimplEnv (
         substCo, substCoVar,
 
         -- * Floats
-        Floats, emptyFloats, isEmptyFloats, addNonRec, addFloats, extendFloats,
+        Floats, emptyFloats, isEmptyFloats, isEmptyJoinFloats,
+        addNonRec, addFloats, extendFloats,
         wrapFloats, setFloats, zapFloats, addRecFloats, mapFloats,
-        restoreFloats, restoreJoinFloats,
+        restoreFloats, restoreJoinFloats, restoreFloatBind, restoreFloatBinds,
         wrapJoinFloats, zapJoinFloats, zapValueFloats, promoteJoinFloats,
-        doFloatFromRhs, getFloatBinds
+        doFloatFromRhs, getFloatBinds, getJoinFloatBinds
     ) where
 
 #include "HsVersions.h"
 
 import SimplMonad
-import CoreMonad                ( SimplifierMode(..) )
+import CoreMonad                ( SimplifierMode(..), getDynFlags )
 import CoreSyn
 import CoreUtils
 import Var
@@ -68,6 +69,8 @@ import Util
 import Maybes
 
 import Data.List
+
+import CoreLint
 
 {-
 ************************************************************************
@@ -499,16 +502,23 @@ unitFloat bind = Floats vbinds jbinds (flag bind)
                                    FltCareful
       -- Unlifted binders can only be let-bound if exprOkForSpeculation holds
 
-addNonRec :: SimplEnv -> OutId -> OutExpr -> SimplEnv
+addNonRec :: SimplEnv -> OutId -> OutExpr -> SimplM SimplEnv
 -- Add a non-recursive binding and extend the in-scope set
 -- The latter is important; the binder may already be in the
 -- in-scope set (although it might also have been created with newId)
 -- but it may now have more IdInfo
 addNonRec env id rhs
-  = id `seq`   -- This seq forces the Id, and hence its IdInfo,
+  = (do
+      dflags <- getDynFlags
+      let vars = varSetElems (getInScopeVars (getInScope env))
+      let errs_m = lintExpr dflags vars rhs
+      case errs_m of Just errs -> pprPanic "rebuild" (errs $$ pprBndr LetBind id $$ ppr rhs $$ pprSimplEnv env)
+                     Nothing   -> return ()
+    ) >> return (
+    id `seq`   -- This seq forces the Id, and hence its IdInfo,
                -- and hence any inner substitutions
     env { seFloats = seFloats env `addFlts` unitFloat (NonRec id rhs),
-          seInScope = extendInScopeSet (seInScope env) id }
+          seInScope = extendInScopeSet (seInScope env) id })
 
 extendFloats :: SimplEnv -> OutBind -> SimplEnv
 -- Add these bindings to the floats, and extend the in-scope env too
@@ -531,19 +541,31 @@ addFlts (Floats vbs1 jbs1 l1) (Floats vbs2 jbs2 l2)
   = Floats (vbs1 `appOL` vbs2) (jbs1 `appOL` jbs2) (l1 `andFF` l2)
 
 addJoinFlts :: Floats -> Floats -> Floats
-addJoinFlts (Floats vbs1 jbs1 l1) (Floats _ jbs2 l2)
-  = Floats vbs1 (jbs1 `appOL` jbs2) l2
+addJoinFlts (Floats vbs1 jbs1 l1) (Floats _ jbs2 _)
+  = Floats vbs1 (jbs1 `appOL` jbs2) l1
 
 restoreFloats :: SimplEnv -> SimplEnv -> SimplEnv
 -- Add the floats for env2 to env1, assuming they were there once before
 -- (so that the in-scope set doesn't need to be adjusted)
 restoreFloats env1 env2
-  = env1 {seFloats = seFloats env1 `addFlts` seFloats env2}
+  = env1 {seFloats = seFloats env2 `addFlts` seFloats env1}
+      -- Put the restored ones on the *outside* because the new ones may
+      -- depend on them
 
 restoreJoinFloats :: SimplEnv -> SimplEnv -> SimplEnv
 -- Like restoreFloats, but just for the joins
 restoreJoinFloats env1 env2
-  = env1 {seFloats = seFloats env1 `addJoinFlts` seFloats env2}
+  = env1 {seFloats = seFloats env2 `addJoinFlts` seFloats env1}
+
+restoreFloatBind :: SimplEnv -> OutBind -> SimplEnv
+-- Add a bind that was previously zapped (so that the in-scope set
+-- doesn't need to be adjusted)
+restoreFloatBind env bind
+  = env {seFloats = unitFloat bind `addFlts` seFloats env}
+
+restoreFloatBinds :: SimplEnv -> [OutBind] -> SimplEnv
+restoreFloatBinds env binds
+  = foldr (flip restoreFloatBind) env binds
 
 zapFloats :: SimplEnv -> SimplEnv
 zapFloats env = env { seFloats = emptyFloats }
@@ -581,9 +603,17 @@ getFloatBinds :: SimplEnv -> [CoreBind]
 getFloatBinds (SimplEnv {seFloats = Floats vbs jbs _})
   = fromOL (vbs `appOL` jbs)
 
+getJoinFloatBinds :: SimplEnv -> [CoreBind]
+getJoinFloatBinds (SimplEnv {seFloats = Floats _ jbs _})
+  = fromOL jbs
+
 isEmptyFloats :: SimplEnv -> Bool
 isEmptyFloats (SimplEnv {seFloats = Floats vbs jbs _})
   = isNilOL vbs && isNilOL jbs
+
+isEmptyJoinFloats :: SimplEnv -> Bool
+isEmptyJoinFloats (SimplEnv {seFloats = Floats _ jbs _})
+  = isNilOL jbs
 
 mapFloats :: SimplEnv -> ((Id,CoreExpr) -> (Id,CoreExpr)) -> SimplEnv
 mapFloats env@SimplEnv { seFloats = Floats vbs jbs ff } fun

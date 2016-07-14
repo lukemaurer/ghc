@@ -23,8 +23,8 @@ module SimplUtils (
         contIsTrivial, contArgs,
         countValArgs, countArgs,
         mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
-        interestingCallContext,
-        lintCont,
+        addJoinFloatsToCont, interestingCallContext,
+        lintCont, lintInExpr, lintOutExpr, lintFloats, lintSimpl, lintSimplEnv,
 
         -- ArgInfo
         ArgInfo(..), ArgSpec(..), mkArgInfo,
@@ -63,6 +63,9 @@ import Outputable
 import Pair
 
 import Control.Monad    ( when )
+
+import CoreLint
+import TysWiredIn
 
 {-
 ************************************************************************
@@ -132,13 +135,17 @@ data SimplCont
   | StrictBind                  -- (\x* \xs. e) <hole>
         InId [InBndr]           -- let x* = <hole> in e
         InExpr                  --      is a special case
-        SimplEnv                -- Note [Join floats in StrictBind]
+        StaticEnv
         SimplCont
 
   | StrictArg           -- f e1 ..en <hole>
         ArgInfo         -- Specifies f, e1..en, Whether f has rules, etc
                         --     plus strictness flags for *further* args
         CallCtxt        -- Whether *this* argument position is interesting
+        SimplCont
+
+  | LetJoins            -- let <join> j = ... in <hole>
+        [CoreBind]      -- Invariant: All joins
         SimplCont
 
   | TickIt
@@ -213,6 +220,7 @@ instance Outputable SimplCont where
   ppr (Select { sc_dup = dup, sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = cont })
     = (text "Select" <+> ppr dup <+> ppr bndr) $$
        ifPprDebug (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont
+  ppr (LetJoins binds cont)           = (text "LetJoins" <+> ppr (bindersOfBinds binds)) $$ ppr cont
 
 
 {- Note [The hole type in ApplyToTy]
@@ -332,6 +340,14 @@ mkRhsStop ty = Stop ty RhsCtxt
 mkLazyArgStop :: OutType -> CallCtxt -> SimplCont
 mkLazyArgStop ty cci = Stop ty cci
 
+addJoinFloatsToCont :: SimplEnv -> SimplCont -> SimplCont
+addJoinFloatsToCont env cont
+  | null jbs  = cont
+  | otherwise = case cont of LetJoins jbs' cont' -> LetJoins (jbs ++ jbs') cont'
+                             _                   -> LetJoins jbs cont
+  where
+    jbs = getJoinFloatBinds env
+
 -------------------
 contIsRhsOrArg :: SimplCont -> Bool
 contIsRhsOrArg (Stop {})       = True
@@ -369,11 +385,13 @@ contResultType (StrictArg _ _ k)            = contResultType k
 contResultType (Select { sc_cont = k })     = contResultType k
 contResultType (ApplyToTy  { sc_cont = k }) = contResultType k
 contResultType (ApplyToVal { sc_cont = k }) = contResultType k
+contResultType (LetJoins _ k)               = contResultType k
 contResultType (TickIt _ k)                 = contResultType k
 
 contHoleType :: SimplCont -> OutType
 contHoleType (Stop ty _)                      = ty
 contHoleType (TickIt _ k)                     = contHoleType k
+contHoleType (LetJoins _ k)                   = contHoleType k
 contHoleType (CastIt co _)                    = pFst (coercionKind co)
 contHoleType (StrictBind b _ _ se _)          = substTy se (idType b)
 contHoleType (StrictArg ai _ _)               = funArgTy (ai_type ai)
@@ -560,6 +578,7 @@ interestingCallContext cont
     interesting (TickIt _ k)                = interesting k
     interesting (ApplyToTy { sc_cont = k }) = interesting k
     interesting (CastIt _ k)                = interesting k
+    interesting (LetJoins _ k)              = interesting k
         -- If this call is the arg of a strict function, the context
         -- is a bit interesting.  If we inline here, we may get useful
         -- evaluation information to avoid repeated evals: e.g.
@@ -608,6 +627,7 @@ interestingArgContext rules call_cont
     go (StrictBind {})     = False      -- ??
     go (CastIt _ c)        = go c
     go (Stop _ cci)        = interesting cci
+    go (LetJoins _ c)      = go c
     go (TickIt _ c)        = go c
 
     interesting RuleArgCtxt = True
@@ -698,16 +718,16 @@ The lintCont function is useful for finding errors early, but it's expensive.
 Accordingly the use in simplExprF is commented out.
 -}
 
-lintCont :: SimplEnv -> InExpr -> SimplCont -> Bool
+lintCont :: String -> SDoc -> SimplEnv -> InExpr -> SimplCont -> Bool
 -- ^ Perform typechecking on the given continuation, given the expression it's
 -- being applied to. Returns True on success; panics with detailed message on
 -- failure. (The expression argument is needed because if this is an invocation
 -- of a join point, the outer context will get thrown out, so the likely type
 -- mismatch doesn't matter.)
-lintCont _ (Type _) _
+lintCont _ _ _ (Type _) _
   = True -- FIXME Types get passed with wrong Stop continuations for some reason
 
-lintCont env e orig_cont
+lintCont hdr doc env e orig_cont
   | Var v <- fun
   , isJoinVar env v
   = True -- Continuation will get thrown out anyway (besides some arguments)
@@ -739,12 +759,14 @@ lintCont env e orig_cont
       = die (text "Not a forall type:" <+> ppr ty)
     go ty (Select { sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = k })
       = check_ty (text "Case binder type") ty (substTy se (idType bndr)) $
+        go (contHoleType k) k ||
         case alts of
           [] -> go (contHoleType k) k -- empty case can nominally return any type
           (_, _, e) : alts'
             -> let alt_ty = substTy se (exprType e)
-               in foldr (\(_, _, e) -> check_ty (text "Alt type") alt_ty
-                                         (substTy se (exprType e)))
+               in foldr (\(_, bndrs, e) -> check_ty (text "Alt type") alt_ty
+                                             (substTy se (exprType e)) .
+                                           (lintInExpr (hdr ++ "/Select") doc se e &&))
                     (go alt_ty k)
                     alts'
     go ty (StrictBind bndr bndrs body se k)
@@ -757,6 +779,12 @@ lintCont env e orig_cont
         go res_ty k
       | otherwise
       = die (text "Not a function type:" <+> ppr (ai_type ai))
+    go ty (LetJoins binds k)
+      | let nonJoins = filter (not . isJoinBndr) (bindersOfBinds binds)
+      , not (null nonJoins)
+      = die (text "Not join binder(s):" <+> ppr nonJoins)
+      | otherwise
+      = go ty k
     go ty (TickIt _ k)
       = go ty k
     
@@ -769,11 +797,99 @@ lintCont env e orig_cont
       = if cond then next else die msg
       
     die msg
-      = pprPanic "lintCont" $
+      = pprPanic hdr $
         vcat [ text "Error in continuation"
              , msg
              , ppr orig_cont
-             , text "Expr:" <+> ppr e ]
+             , text "Expr:" <+> ppr e
+             , doc ]
+
+lintInExpr :: String -> SDoc -> SimplEnv -> InExpr -> Bool
+-- Lint an incoming expression, for well-scopedness *only*. Can't use regular
+-- CoreLint because variables being substituted for aren't in the in-scope set.
+lintInExpr hdr doc orig_env orig_expr
+  = go init_scope orig_expr
+  where
+    init_scope = dom (seIdSubst orig_env) `plusVarEnv`
+                 dom (seTvSubst orig_env) `plusVarEnv`
+                 dom (seCvSubst orig_env) `plusVarEnv`
+                 dom (getInScopeVars (seInScope orig_env))
+    
+    -- Erase the values in a VarEnv
+    dom m = mapVarEnv (\_ -> ()) m
+    
+    go env (Var var)       = check env var
+    go env (App e1 e2)     = go env e1 && go env e2
+    go env (Lam x e)       = go (extendVarEnv env x ()) e
+    go env (Let b e)       = go (go_bind env b) e
+    go env (Case e x _ as) = go env e && and (map (go_alt env') as)
+      where env' = extendVarEnv env x ()
+    go env (Cast e _)      = go env e
+    go env (Tick _ e)      = go env e
+    go _   _               = True
+    
+    go_bind env (NonRec x e) | go env e = extendVarEnv env x ()
+    go_bind env (Rec pairs)  | and [go env' e | (_, e) <- pairs] = env'
+      where env' = extendVarEnvList env [(x, ()) | (x, _) <- pairs]
+    go_bind _   _            = die (text "unknown") -- shouldn't actually happen
+    
+    go_alt env (_, xs, e) = go (extendVarEnvList env [(x, ()) | x <- xs]) e
+    
+    check scope var
+      | not (isLocalId var)
+      = True
+      | var `elemVarEnv` scope
+      = True
+      | otherwise
+      = die (text "Variable not in scope:" <+> pprBndr LambdaBind var)
+    
+    die msg
+      = pprPanic hdr $
+        vcat [ text "Error in incoming expression"
+             , msg
+             , ppr orig_expr
+             , doc ]    
+
+lintOutExpr :: String -> SDoc -> SimplEnv -> OutExpr -> Bool
+lintOutExpr hdr doc env expr
+  = case errs_m of Just errs -> pprPanic hdr $
+                                  errs $$ ppr expr $$ pprSimplEnv env $$ doc
+                   Nothing   -> True
+  where
+    errs_m | isTypeArg expr = Nothing
+           | otherwise      = lintExpr unsafeGlobalDynFlags vars expr
+    vars = varSetElems (getInScopeVars (getInScope env))
+
+lintFloats :: String -> SDoc -> SimplEnv -> Bool
+lintFloats hdr doc env
+  = lintOutExpr hdr doc env (foldr Let (Var unitDataConId) (getFloatBinds env))
+
+lintSubst :: String -> SDoc -> SimplEnv -> Bool
+lintSubst hdr doc env
+  = and [lint_sr bndr sr | (bndr, (sr, _)) <- varEnvToList (seIdSubst env)]
+  where
+    lint_sr bndr (DoneEx e) = lintOutExpr hdr doc env e
+    lint_sr bndr (DoneId v)
+      | v `elemInScopeSet` seInScope env = True
+      | otherwise = pprPanic hdr $
+                      text "Substituend variable not in scope:" <+> ppr v $$
+                      text "Bound to:" <+> ppr bndr $$
+                      pprSimplEnv env $$
+                      doc
+    lint_sr bndr (ContEx tvs cvs ids e)
+      = lintInExpr hdr doc (setSubstEnv env tvs cvs ids) e
+
+lintSimpl :: String -> SDoc -> SimplEnv -> InExpr -> SimplCont -> Bool
+lintSimpl hdr doc env expr cont
+  = lintInExpr (hdr ++ "/lintInExpr") doc env expr &&
+    lintFloats (hdr ++ "/lintFloats") doc env &&
+    lintSubst  (hdr ++ "/lintSubst")  doc env &&
+    lintCont   (hdr ++ "/lintCont")   doc env expr cont
+
+lintSimplEnv :: String -> SDoc -> SimplEnv -> Bool
+lintSimplEnv hdr doc env
+  = lintFloats (hdr ++ "/lintFloats") doc env &&
+    lintSubst  (hdr ++ "/lintSubst")  doc env
 
 {-
 ************************************************************************
