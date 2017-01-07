@@ -11,7 +11,7 @@ The occurrence analyser re-typechecks a core expression, returning a new
 core expression with (hopefully) improved usage information.
 -}
 
-{-# LANGUAGE CPP, BangPatterns #-}
+{-# LANGUAGE CPP, BangPatterns, MultiWayIf #-}
 
 module OccurAnal (
         occurAnalysePgm, occurAnalyseExpr, occurAnalyseExpr_NoBinderSwap
@@ -79,7 +79,7 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
           -- so that we establish the right loop breakers. Otherwise
           -- we can easily create an infinite loop (Trac #9583 is an example)
 
-    initial_uds = addIdOccs emptyDetails
+    initial_uds = addManyOccsSet emptyDetails
                             (rulesFreeVars imp_rules `unionVarSet`
                              vectsFreeVars vects `unionVarSet`
                              vectVars)
@@ -685,10 +685,10 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
                    Nothing        -> rhs_usage1
        -- See Node [Rules, unfoldings, and join points]
 
-    rhs_usage3 = addIdOccs rhs_usage2 (idRuleVars binder)
+    rhs_usage3 = addManyOccsSet rhs_usage2 (idRuleVars binder)
        -- See Note [Rules are extra RHSs] and Note [Rule dependency info]
 
-    rhs_usage4 = maybe rhs_usage3 (addIdOccs rhs_usage3) $
+    rhs_usage4 = maybe rhs_usage3 (addManyOccsSet rhs_usage3) $
                  lookupVarEnv imp_rule_edges binder
        -- See Note [Preventing loops due to imported functions rules]
 
@@ -775,12 +775,11 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
 
     ----------------------------
     -- Compute usage details
-    zapped_body_uds = forceZapping body_uds -- Going to reuse; don't zap twice!
-    orig_total_uds = foldl add_uds zapped_body_uds orig_details_s
+    orig_total_uds = foldl add_uds body_uds orig_details_s
 
     make_joins = canBecomeJoinPoints lvl Recursive orig_total_uds orig_pairs
     details_s = map adjust orig_details_s
-    total_uds = foldl add_uds zapped_body_uds details_s
+    total_uds = foldl add_uds body_uds details_s
     final_uds = total_uds `minusDetails` bndr_set
     add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
 
@@ -1129,8 +1128,9 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
     -- Constructing the edges for the main Rec computation
     -- See Note [Forming Rec groups]
     (rhs_usage1, rhs') = occAnalRecRhs env rhs
-    rhs_usage2 = addIdOccs rhs_usage1 all_rule_fvs   -- Note [Rules are extra RHSs]
-                                                     -- Note [Rule dependency info]
+    rhs_usage2 = addManyOccsSet rhs_usage1 all_rule_fvs
+                   -- Note [Rules are extra RHSs]
+                   -- Note [Rule dependency info]
     rhs_usage3 = case mb_unf_uds of
                    Just unf_uds -> rhs_usage2 +++ unf_uds
                    Nothing      -> rhs_usage2
@@ -1480,7 +1480,7 @@ occAnalUnfolding env rec_flag id
                          | otherwise      = occAnalNonRecRhs env id rhs
 
       DFunUnfolding { df_bndrs = bndrs, df_args = args }
-        -> Just $ zapDetails (delManyDetails usage bndrs)
+        -> Just $ zapDetails (delDetailsList usage bndrs)
         where
           usage = foldr (+++) emptyDetails (map (fst . occAnal env) args)
 
@@ -1551,7 +1551,7 @@ occAnal env expr@(Var _)  = occAnalApp env (expr, [], [])
     -- weren't used at all.
 
 occAnal _ (Coercion co)
-  = (addIdOccs emptyDetails (coVarsOfCo co), Coercion co)
+  = (addManyOccsSet emptyDetails (coVarsOfCo co), Coercion co)
         -- See Note [Gather occurrences of coercion variables]
 
 {-
@@ -1563,10 +1563,10 @@ we can sort them into the right place when doing dependency analysis.
 
 occAnal env (Tick tickish body)
   | tickish `tickishScopesLike` SoftScope
-  = (dropTailCallInfo usage, Tick tickish body')
+  = (markAllNonTailCalled usage, Tick tickish body')
 
   | Breakpoint _ ids <- tickish
-  = (usage_lam +++ foldr addIdOcc emptyDetails ids, Tick tickish body')
+  = (usage_lam +++ foldr addManyOccs emptyDetails ids, Tick tickish body')
     -- never substitute for any of the Ids in a Breakpoint
 
   | otherwise
@@ -1574,7 +1574,7 @@ occAnal env (Tick tickish body)
   where
     !(usage,body') = occAnal env body
     -- for a non-soft tick scope, we can inline lambdas only
-    usage_lam = dropTailCallInfo (markAllInsideLam usage)
+    usage_lam = markAllNonTailCalled (markAllInsideLam usage)
                   -- TODO There may be ways to make ticks and join points play
                   -- nicer together, but right now there are problems:
                   --   let j x = ... in tick<t> (j 1)
@@ -1585,9 +1585,9 @@ occAnal env (Tick tickish body)
 occAnal env (Cast expr co)
   = case occAnal env expr of { (usage, expr') ->
     let usage1 = zapDetailsIf (isRhsEnv env) usage
-        usage2 = addIdOccs usage1 (coVarsOfCo co)
+        usage2 = addManyOccsSet usage1 (coVarsOfCo co)
           -- See Note [Gather occurrences of coercion variables]
-    in (dropTailCallInfo usage2, Cast expr' co)
+    in (markAllNonTailCalled usage2, Cast expr' co)
         -- If we see let x = y `cast` co
         -- then mark y as 'Many' so that we don't
         -- immediately inline y again.
@@ -1602,7 +1602,7 @@ occAnal env app@(App _ _)
 
 occAnal env (Lam x body) | isTyVar x
   = case occAnal env body of { (body_usage, body') ->
-    (dropTailCallInfo body_usage, Lam x body')
+    (markAllNonTailCalled body_usage, Lam x body')
     }
 
 -- For value lambdas we do a special hack.  Consider
@@ -1630,7 +1630,7 @@ occAnal env (Case scrut bndr ty alts)
     let
         alts_usage  = foldr combineAltsUsageDetails emptyDetails alts_usage_s
         (alts_usage1, tagged_bndr) = tag_case_bndr alts_usage bndr
-        total_usage = dropTailCallInfo scrut_usage +++ alts_usage1
+        total_usage = markAllNonTailCalled scrut_usage +++ alts_usage1
                         -- Alts can have tail calls, but the scrutinee can't
     in
     total_usage `seq` (total_usage, Case scrut' tagged_bndr ty alts') }}
@@ -1720,8 +1720,9 @@ occAnalApp env (Var fun, args, ticks)
 
     !(args_uds, args') = occAnalArgs env args one_shots
     !final_args_uds
-       | isRhsEnv env && is_exp = dropTailCallInfo $ markAllInsideLam args_uds
-       | otherwise              = dropTailCallInfo args_uds
+       | isRhsEnv env && is_exp = markAllNonTailCalled $
+                                  markAllInsideLam args_uds
+       | otherwise              = markAllNonTailCalled args_uds
        -- We mark the free vars of the argument of a constructor or PAP
        -- as "inside-lambda", if it is the RHS of a let(rec).
        -- This means that nothing gets inlined into a constructor or PAP
@@ -1744,7 +1745,8 @@ occAnalApp env (Var fun, args, ticks)
                  -- See Note [Use one-shot info]
 
 occAnalApp env (fun, args, ticks)
-  = (dropTailCallInfo (fun_uds +++ args_uds), mkTicks ticks $ mkApps fun' args')
+  = (markAllNonTailCalled (fun_uds +++ args_uds),
+     mkTicks ticks $ mkApps fun' args')
   where
     !(fun_uds, fun') = occAnal (addAppCtxt env args) fun
         -- The addAppCtxt is a bit cunning.  One iteration of the simplifier
@@ -2188,128 +2190,151 @@ type OccInfoEnv = IdEnv OccInfo -- A finite map from ids to their usage
                 -- INVARIANT: never IAmDead
                 -- (Deadness is signalled by not being in the map at all)
 
-data UsageDetails
-  = UD !OccInfoEnv !Zapper
+type ZappedSet = OccInfoEnv -- Values are ignored
 
-data Zapper -- Function which will zap each OccInfo when applied
-  = ZapAll                               -- Set everything to noOccInfo
-  | Zapper { zap_markAllInLam :: !Bool   -- Each id appears under a lambda
-           , zap_zapTailCalls :: !Bool } -- No calls count as tail calls
-  deriving (Eq)
+data UsageDetails
+  = UD { ud_env       :: !OccInfoEnv
+       , ud_z_many    :: ZappedSet
+       , ud_z_in_lam  :: ZappedSet
+       , ud_z_no_tail :: ZappedSet }
+  -- INVARIANT: All three zapped sets are subsets of the OccInfoEnv
 
 instance Outputable UsageDetails where
-  ppr (UD env zapper)
-    = sep [parens (ppr zapper), ppr env]
+  ppr ud = ppr (ud_env (flattenUsageDetails ud))
 
-instance Outputable Zapper where
-  ppr ZapAll = text "zap all occ info"
-  ppr (Zapper in_lam no_tail)
-    | null parts = text "no zapping"
-    | otherwise  = pprWithCommas text parts
-    where
-      parts = [ "all under lambda" | in_lam  ] ++
-              [ "no tail calls"    | no_tail ]
+-------------------
+-- UsageDetails API
 
-idZapper :: Zapper
-idZapper = Zapper False False
+(+++)          :: UsageDetails -> UsageDetails -> UsageDetails
+combineAltsUsageDetails :: UsageDetails -> UsageDetails -> UsageDetails
+mkOneOcc       :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
+addOneOcc      :: UsageDetails -> Id -> OccInfo -> UsageDetails
+-- Add several occurrences, assumed not to be tail calls
+addManyOccs    :: Var -> UsageDetails -> UsageDetails
+addManyOccsSet :: UsageDetails -> VarSet -> UsageDetails
+delDetails     :: UsageDetails -> Id -> UsageDetails
+delDetailsList :: UsageDetails -> [Id] -> UsageDetails
+minusDetails   :: UsageDetails -> IdEnv a -> UsageDetails
+emptyDetails   :: UsageDetails
+isEmptyDetails :: UsageDetails -> Bool
+zapDetails     :: UsageDetails -> UsageDetails
+markAllMany    :: UsageDetails -> UsageDetails
+markAllInsideLam     :: UsageDetails -> UsageDetails
+markAllNonTailCalled :: UsageDetails -> UsageDetails
+lookupDetails  :: UsageDetails -> Id -> OccInfo
+usedIn         :: Id -> UsageDetails -> Bool
+udFreeVars     :: VarSet -> UsageDetails -> VarSet
 
-isIdZapper :: Zapper -> Bool
-isIdZapper (Zapper False False) = True
-isIdZapper _                    = False
-
-runZapper :: Zapper -> OccInfo -> OccInfo
-runZapper ZapAll
-  = const noOccInfo
-runZapper (Zapper all_in_lam no_tail)
-  = (if all_in_lam then markInsideLam     else id) .
-    (if no_tail    then markNonTailCalled else id)
-
-mapZapper :: Zapper -> VarEnv OccInfo -> VarEnv OccInfo
-mapZapper zapper
-  | isIdZapper zapper = id
-  | otherwise         = mapVarEnv (runZapper zapper)
-
-leZapper :: Zapper -> Zapper -> Bool
-leZapper _ ZapAll = True
-leZapper ZapAll _ = False
-leZapper (Zapper a1 a2) (Zapper b1 b2)
-  = a1 <= b1 && a2 <= b2 -- NB False < True
-
-(+++), combineAltsUsageDetails
-        :: HasCallStack => UsageDetails -> UsageDetails -> UsageDetails
-
+-------------------
 (+++) = combineUsageDetailsWith addOccInfo
 combineAltsUsageDetails = combineUsageDetailsWith orOccInfo
 
-combineUsageDetailsWith :: HasCallStack => (OccInfo -> OccInfo -> OccInfo)
-                        -> UsageDetails -> UsageDetails -> UsageDetails
-combineUsageDetailsWith plus_occ_info ud1@(UD env1 zap1) ud2@(UD env2 zap2)
-  -- Important and very common cheap cases; don't zap for no reason!
-  | isEmptyVarEnv env1 = ud2
-  | isEmptyVarEnv env2 = ud1
-  -- We want to zap lazily when possible. When combining environments with
-  -- different zappers, we apply the stronger one immediately and use the
-  -- weaker one for the combined tree. (One side may end up zapped twice, but
-  -- zappers are idempotent, so no harm done.)
-  | zap1 == zap2
-  = -- Good news! Just combine them and zap later
-    UD (plusVarEnv_C plus_occ_info env1 env2)
-       zap1
-  | zap1 `leZapper` zap2
-  = -- Zap on the right
-    UD (merge idZapper zap2 env1 env2) zap1
-  | zap2 `leZapper` zap1
-  = -- Zap on the left
-    UD (merge zap1 idZapper env1 env2) zap2
+mkOneOcc env id int_cxt arity
+  | isLocalId id
+  = singleton $ OneOcc { occ_in_lam  = False
+                       , occ_one_br  = True
+                       , occ_int_cxt = int_cxt
+                       , occ_tail    = AlwaysTailCalled arity }
+  | id `elemVarEnv` occ_gbl_scrut env
+  = singleton noOccInfo
+
   | otherwise
-    -- Zap all around
-  = UD (merge zap1 zap2 env1 env2) idZapper
+  = emptyDetails
   where
-    merge zap1 zap2 env1 env2
-      = mergeUFM_Directly (combine zap1 zap2) (mapZapper zap1) (mapZapper zap2)
-          env1 env2
+    singleton info = emptyDetails { ud_env = unitVarEnv id info }
 
-    combine zap1 zap2
-      = \_uniq occ1 occ2 -> Just $ plus_occ_info (runZapper zap1 occ1)
-                                                 (runZapper zap2 occ2)
-
-addOneOcc :: UsageDetails -> Id -> OccInfo -> UsageDetails
-addOneOcc (UD env zap) id info
-  = UD (plusVarEnv_C addOccInfo zapped_env (unitVarEnv id info)) idZapper
+addOneOcc ud id info
+  = ud { ud_env = extendVarEnv_C plus_zapped (ud_env ud) id info }
+      `alterZappedSets` (`delVarEnv` id)
   where
-    zapped_env = mapZapper zap env
-        -- ToDo: make this more efficient
+    plus_zapped old new = doZapping ud id old `addOccInfo` new
 
-delDetails :: UsageDetails -> Id -> UsageDetails
-delDetails (UD env zap) bndr
-  = UD (env `delVarEnv` bndr) zap
+addManyOccsSet usage id_set = nonDetFoldUFM addManyOccs usage id_set
+  -- It's OK to use nonDetFoldUFM here because addManyOccs commutes
 
-delManyDetails :: UsageDetails -> [Id] -> UsageDetails
-delManyDetails usage bndrs
-  = foldl delDetails usage bndrs
+addManyOccs v u | isId v    = addOneOcc u v noOccInfo
+                | otherwise = u
+        -- Give a non-committal binder info (i.e noOccInfo) because
+        --   a) Many copies of the specialised thing can appear
+        --   b) We don't want to substitute a BIG expression inside a RULE
+        --      even if that's the only occurrence of the thing
+        --      (Same goes for INLINE.)
 
-minusDetails :: UsageDetails -> IdEnv a -> UsageDetails
-minusDetails (UD env zap) bndrs
-  = UD (env `minusVarEnv` bndrs) zap
 
-emptyDetails :: UsageDetails
-emptyDetails = UD emptyVarEnv idZapper
+delDetails ud bndr
+  = ud `alterUsageDetails` (`delVarEnv` bndr)
 
-isEmptyDetails :: UsageDetails -> Bool
-isEmptyDetails (UD env _) = isEmptyVarEnv env
+delDetailsList ud bndrs
+  = ud `alterUsageDetails` (`delVarEnvList` bndrs)
 
-zapDetails, dropTailCallInfo, markAllInsideLam :: UsageDetails -> UsageDetails
-zapDetails       (UD env _)      = UD env ZapAll
-dropTailCallInfo (UD env ZapAll) = UD env ZapAll
-dropTailCallInfo (UD env zapper) = UD env (zapper { zap_zapTailCalls = True })
-markAllInsideLam (UD env ZapAll) = UD env ZapAll
-markAllInsideLam (UD env zapper) = UD env (zapper { zap_markAllInLam = True })
+minusDetails ud bndrs
+  = ud `alterUsageDetails` (`minusVarEnv` bndrs)
 
-forceZapping :: UsageDetails -> UsageDetails
-forceZapping ud@(UD env zap)
-  | isIdZapper zap = ud
-  | otherwise      = UD (mapZapper zap env) idZapper
+emptyDetails = UD { ud_env       = emptyVarEnv
+                  , ud_z_many    = emptyVarEnv
+                  , ud_z_in_lam  = emptyVarEnv
+                  , ud_z_no_tail = emptyVarEnv }
 
+isEmptyDetails = isEmptyVarEnv . ud_env
+
+markAllMany          ud = ud { ud_z_many    = ud_env ud }
+markAllInsideLam     ud = ud { ud_z_in_lam  = ud_env ud }
+markAllNonTailCalled ud = ud { ud_z_no_tail = ud_env ud }
+
+zapDetails = markAllMany . markAllNonTailCalled -- effectively sets to noOccInfo
+
+lookupDetails ud id
+  = case lookupVarEnv (ud_env ud) id of
+      Just occ -> doZapping ud id occ
+      Nothing  -> IAmDead
+
+v `usedIn` ud = isExportedId v || v `elemVarEnv` ud_env ud
+
+-- Find the subset of bndrs that are mentioned in uds
+udFreeVars bndrs ud = intersectUFM_C (\b _ -> b) bndrs (ud_env ud)
+
+-------------------
+-- Auxiliary functions for UsageDetails implementation
+
+combineUsageDetailsWith :: (OccInfo -> OccInfo -> OccInfo)
+                        -> UsageDetails -> UsageDetails -> UsageDetails
+combineUsageDetailsWith plus_occ_info ud1 ud2
+  = UD { ud_env       = plusVarEnv_C plus_occ_info (ud_env ud1) (ud_env ud2)
+       , ud_z_many    = plusVarEnv (ud_z_many    ud1) (ud_z_many    ud2)
+       , ud_z_in_lam  = plusVarEnv (ud_z_in_lam  ud1) (ud_z_in_lam  ud2)
+       , ud_z_no_tail = plusVarEnv (ud_z_no_tail ud1) (ud_z_no_tail ud2) }
+
+doZapping :: UsageDetails -> Var -> OccInfo -> OccInfo
+doZapping ud var occ
+  = doZappingByUnique ud (varUnique var) occ
+
+doZappingByUnique :: UsageDetails -> Unique -> OccInfo -> OccInfo
+doZappingByUnique ud uniq
+  = (if | in_subset ud_z_many    -> markMany
+        | in_subset ud_z_in_lam  -> markInsideLam
+        | otherwise              -> id) .
+    (if | in_subset ud_z_no_tail -> markNonTailCalled
+        | otherwise              -> id)
+  where
+    in_subset field = uniq `elemVarEnvByKey` field ud
+
+alterZappedSets :: UsageDetails -> (ZappedSet -> ZappedSet) -> UsageDetails
+alterZappedSets ud f
+  = ud { ud_z_many    = f (ud_z_many    ud)
+       , ud_z_in_lam  = f (ud_z_in_lam  ud)
+       , ud_z_no_tail = f (ud_z_no_tail ud) }
+
+alterUsageDetails :: UsageDetails -> (OccInfoEnv -> OccInfoEnv) -> UsageDetails
+alterUsageDetails ud f
+  = ud { ud_env = f (ud_env ud) }
+      `alterZappedSets` f
+
+flattenUsageDetails :: UsageDetails -> UsageDetails
+flattenUsageDetails ud
+  = ud { ud_env = mapUFM_Directly (doZappingByUnique ud) (ud_env ud) }
+      `alterZappedSets` const emptyVarEnv
+
+-------------------
 -- | Apply adjustments from join-point-hood and one-shot-ness to usage details
 -- from a lambda expression or a binding's RHS. Can't be done from occAnalRhs
 -- because it doesn't yet know whether the binding will become a join point.
@@ -2341,7 +2366,7 @@ adjustRhsUsage mb_join_arity rec_flag expr usage
     maybe_mark_lam ud   | one_shot   = ud
                         | otherwise  = markAllInsideLam ud
     maybe_drop_tails ud | exact_join = ud
-                        | otherwise  = dropTailCallInfo ud
+                        | otherwise  = markAllNonTailCalled ud
 
     one_shot = case mb_join_arity of
                  Just join_arity
@@ -2354,33 +2379,6 @@ adjustRhsUsage mb_join_arity rec_flag expr usage
     exact_join = case mb_join_arity of
                    Just join_arity -> join_arity == length bndrs
                    _               -> False
-
-lookupDetails :: UsageDetails -> Id -> OccInfo
-lookupDetails (UD env zapper) id
-  = case lookupVarEnv env id of
-      Just occ -> runZapper zapper occ
-      Nothing  -> IAmDead
-
-usedIn :: Id -> UsageDetails -> Bool
-v `usedIn` UD env _ = isExportedId v || v `elemVarEnv` env
-
--- Add several occurrences, assumed not to be tail calls
-addIdOccs :: UsageDetails -> VarSet -> UsageDetails
-addIdOccs usage id_set = nonDetFoldUFM addIdOcc usage id_set
-  -- It's OK to use nonDetFoldUFM here because addIdOcc commutes
-
-addIdOcc :: Id -> UsageDetails -> UsageDetails
-addIdOcc v u | isId v    = addOneOcc u v noOccInfo
-             | otherwise = u
-        -- Give a non-committal binder info (i.e noOccInfo) because
-        --   a) Many copies of the specialised thing can appear
-        --   b) We don't want to substitute a BIG expression inside a RULE
-        --      even if that's the only occurrence of the thing
-        --      (Same goes for INLINE.)
-
-udFreeVars :: VarSet -> UsageDetails -> VarSet
--- Find the subset of bndrs that are mentioned in uds
-udFreeVars bndrs (UD env _) = intersectUFM_C (\b _ -> b) bndrs env
 
 type IdWithOccInfo = Id
 
@@ -2397,10 +2395,10 @@ tagLamBinders usage binders = usage' `seq` (usage', bndrs')
     tag_lam usage bndr = (usage2, bndr')
       where
         (usage1, bndr') = tagBinder False usage bndr
-        usage2 | isId bndr = addIdOccs usage1 (idUnfoldingVars bndr)
+        usage2 | isId bndr = addManyOccsSet usage1 (idUnfoldingVars bndr)
                                -- This is effectively the RHS of a
                                -- non-join-point binding, so it's okay to use
-                               -- addIdOccs, which assumes no tail calls
+                               -- addManyOccsSet, which assumes no tail calls
                | otherwise = usage1
 
 tagBinder :: Bool                   -- Can it be a join point?
@@ -2413,7 +2411,7 @@ tagBinder make_join usage binder
  = let
      usage'  = usage `delDetails` binder
      binder' | make_join = setBinderOcc usage binder
-             | otherwise = setBinderOcc (dropTailCallInfo usage) binder
+             | otherwise = setBinderOcc (markAllNonTailCalled usage) binder
    in
    usage' `seq` (usage', binder')
 
@@ -2473,21 +2471,10 @@ willBeJoinId_maybe bndr
 ************************************************************************
 -}
 
-mkOneOcc :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
-mkOneOcc env id int_cxt arity
-  | isLocalId id
-  = UD (unitVarEnv id (OneOcc { occ_in_lam  = False
-                              , occ_one_br  = True
-                              , occ_int_cxt = int_cxt
-                              , occ_tail    = AlwaysTailCalled arity }))
-       idZapper
-  | id `elemVarEnv` occ_gbl_scrut env
-  = UD (unitVarEnv id noOccInfo) idZapper
+markMany, markInsideLam, markNonTailCalled :: OccInfo -> OccInfo
 
-  | otherwise
-  = emptyDetails
-
-markInsideLam, markNonTailCalled :: OccInfo -> OccInfo
+markMany IAmDead = IAmDead
+markMany occ     = ManyOccs { occ_tail = occ_tail occ }
 
 markInsideLam occ@(OneOcc {}) = occ { occ_in_lam = True }
 markInsideLam occ             = occ
