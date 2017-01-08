@@ -816,23 +816,23 @@ defn of OccInfo here, safely at the bottom
 
 -- | identifier Occurrence Information
 data OccInfo
-  = ManyOccs            -- ^ There are many occurrences, or unknown occurrences
-      { occ_tail    :: !TailCallInfo }
+  = ManyOccs        { occ_tail    :: !TailCallInfo }
+                        -- ^ There are many occurrences, or unknown occurrences
 
   | IAmDead             -- ^ Marks unused variables.  Sometimes useful for
                         -- lambda and case-bound variables.
 
-  | OneOcc              -- ^ Occurs exactly once (per branch), not inside a rule
-      { occ_in_lam  :: !InsideLam
-      , occ_one_br  :: !OneBranch
-      , occ_int_cxt :: !InterestingCxt
-      , occ_tail    :: !TailCallInfo }
+  | OneOcc          { occ_in_lam  :: !InsideLam
+                    , occ_one_br  :: !OneBranch
+                    , occ_int_cxt :: !InterestingCxt
+                    , occ_tail    :: !TailCallInfo }
+                        -- ^ Occurs exactly once (per branch), not inside a rule
 
   -- | This identifier breaks a loop of mutually recursive functions. The field
   -- marks whether it is only a loop breaker due to a reference in a rule
-  | IAmALoopBreaker     -- Note [LoopBreaker OccInfo]
-      { occ_rules_only :: !RulesOnly
-      , occ_tail       :: !TailCallInfo }
+  | IAmALoopBreaker { occ_rules_only :: !RulesOnly
+                    , occ_tail       :: !TailCallInfo }
+                        -- Note [LoopBreaker OccInfo]
 
   deriving (Eq)
 
@@ -888,7 +888,7 @@ data TailCallInfo = AlwaysTailCalled JoinArity -- See Note [TailCallInfo]
   deriving (Eq)
 
 tailCallInfo :: OccInfo -> TailCallInfo
-tailCallInfo IAmDead   = NoTailCallInfo -- *could* convert but no point
+tailCallInfo IAmDead   = NoTailCallInfo
 tailCallInfo other     = occ_tail other
 
 isAlwaysTailCalled :: OccInfo -> Bool
