@@ -3,7 +3,7 @@
 (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor #-}
+{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, FlexibleContexts #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -1436,10 +1436,16 @@ type TaggedAlt  t = Alt  (TaggedBndr t)
 instance Outputable b => Outputable (TaggedBndr b) where
   ppr (TB b l) = char '<' <> ppr b <> comma <> ppr l <> char '>'
 
-instance Outputable b => OutputableBndr (TaggedBndr b) where
+-- OutputableBndr Var is declared separately in PprCore; using a FlexibleContext
+-- to avoid circularity
+instance (OutputableBndr Var, Outputable b) =>
+    OutputableBndr (TaggedBndr b) where
   pprBndr _ b = ppr b   -- Simple
   pprInfixOcc  b = ppr b
   pprPrefixOcc b = ppr b
+  pprNonRecBndrKeyword (TB b _) = pprNonRecBndrKeyword b
+  pprRecBndrKeyword    (TB b _) = pprRecBndrKeyword    b
+  pprLamsOnLhs         (TB b _) = pprLamsOnLhs         b
 
 deTagExpr :: TaggedExpr t -> CoreExpr
 deTagExpr (Var v)                   = Var v
