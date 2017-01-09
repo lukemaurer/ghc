@@ -38,6 +38,8 @@ module CoreSubst (
 
 #include "HsVersions.h"
 
+import {-# SOURCE #-} CoreArity ( etaExpandToJoinPoint )
+
 import CoreSyn
 import CoreFVs
 import CoreSeq
@@ -1043,8 +1045,15 @@ simple_opt_bind' subst (Rec prs)
            Just subst' -> (subst', prs)
            Nothing     -> (subst,  (b2,r2):prs)
        where
-         b2 = add_info subst b b'
-         r2 = simple_opt_expr subst r
+         (b1, r1) | AlwaysTailCalled ar <- tailCallInfo (idOccInfo b')
+                  , (bndrs, body) <- etaExpandToJoinPoint ar r
+                  = (maybeModifyIdInfo (zapTailCallInfo (idInfo b')) $
+                       b' `asJoinId` ar,
+                     mkLams bndrs body)
+                  | otherwise
+                  = (b', r)
+         b2 = add_info subst b b1
+         r2 = simple_opt_expr subst r1
 
 simple_opt_bind' subst (NonRec b r)
   = simple_opt_out_bind subst (b, simple_opt_expr subst r)
@@ -1124,11 +1133,7 @@ subst_opt_id_bndr subst@(Subst in_scope id_subst tv_subst cv_subst) old_id
   where
     id1    = uniqAway in_scope old_id
     id2    = setIdType id1 (substTy subst (idType old_id))
-    id3    | AlwaysTailCalled join_arity <- tailCallInfo (idOccInfo id2)
-           = id2 `asJoinId` join_arity
-           | otherwise
-           = id2
-    new_id = zapFragileIdInfo id3       -- Zaps rules, worker-info, unfolding
+    new_id = zapFragileIdInfo id2       -- Zaps rules, worker-info, unfolding
                                         -- and fragile OccInfo
     new_in_scope = in_scope `extendInScopeSet` new_id
 

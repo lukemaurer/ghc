@@ -12,7 +12,7 @@
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
-        splitJoinPoint
+        etaExpandToJoinPoint
     ) where
 
 #include "HsVersions.h"
@@ -1023,7 +1023,7 @@ etaInfoAppRhs subst bndr expr eis
   where
     do_join_point arity = mkLams join_bndrs' join_body'
       where
-        (join_bndrs, join_body) = splitJoinPoint arity expr
+        (join_bndrs, join_body) = collectNBinders arity expr
         (subst', join_bndrs') = substBndrs subst join_bndrs
         join_body' = etaInfoApp subst' join_body eis
 
@@ -1085,10 +1085,10 @@ subst_expr = substExpr (text "CoreArity:substExpr")
 
 --------------
 
--- | Split a join point into its binders and its body, eta-expanding if
--- necessary.
-splitJoinPoint :: JoinArity -> CoreExpr -> ([CoreBndr], CoreExpr)
-splitJoinPoint join_arity expr
+-- | Split an expression into the given number of binders and a body,
+-- eta-expanding if necessary. Counts value *and* type binders.
+etaExpandToJoinPoint :: JoinArity -> CoreExpr -> ([CoreBndr], CoreExpr)
+etaExpandToJoinPoint join_arity expr
   = go join_arity [] expr
   where
     go 0 rev_bs e         = (reverse rev_bs, e)

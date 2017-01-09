@@ -586,14 +586,10 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
     size_up_rhs (bndr, rhs)
       | isId bndr
       , Just join_arity <- isJoinId_maybe bndr
-      , let body = skip join_arity rhs
+      , (_bndrs, body) <- collectNBinders join_arity rhs
       = size_up body
       | otherwise
       = size_up rhs
-      where
-        skip 0 body         = body
-        skip n (Lam _ body) = skip (n-1) body
-        skip _ body         = body
 
     ------------
     -- size_up_app is used when there's ONE OR MORE value args

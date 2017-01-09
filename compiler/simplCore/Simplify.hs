@@ -1063,12 +1063,9 @@ simplJoinRhs env cont bndr expr
     simpl_join_lams arity
       = do { (env', join_bndrs') <- simplLamBndrs env join_bndrs
            ; join_body' <- simplExprC env' join_body cont
-           ; let lam_cont = mkRhsStop (exprType join_body')
-               -- Only purpose of lam_cont is to prevent mkLam from
-               -- eta-expanding
-           ; mkLam join_bndrs' join_body' lam_cont }
+           ; return $ mkLams join_bndrs' join_body' }
       where
-        (join_bndrs, join_body) = splitJoinPoint arity expr
+        (join_bndrs, join_body) = collectNBinders arity expr
 
 ---------------------------------
 simplType :: SimplEnv -> InType -> SimplM OutType
@@ -1488,7 +1485,7 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
            -> simplExprF (rhs_se `setFloats` env) rhs
                          (StrictBind bndr bndrs body env cont)
 
-           | Just bndr' <- matchOrConvertToJoinId bndr
+           | Just (bndr', rhs') <- matchOrConvertToJoinPoint bndr rhs
            -> do { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
                                            [bndr'] cont
                  ; (env1, bndr1) <- simplNonRecJoinBndr env
@@ -1502,7 +1499,7 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
                      ppr cont_dup $$ blankLine $$
                      ppr cont_nodup)
                  ; env4 <- simplJoinBind env3 NonRecursive cont_dup bndr' bndr2
-                                         rhs rhs_se
+                                         rhs' rhs_se
                  ; (env5, expr) <- simplLam env4 bndrs body cont_dup
                  ; rebuild (env5 `restoreJoinFloats` env2)
                            (wrapJoinFloats env5 expr) cont_nodup }
@@ -1524,8 +1521,9 @@ simplRecE :: SimplEnv
 -- simplRecE is used for
 --  * non-top-level recursive lets in expressions
 simplRecE env pairs body cont
-  | Just bndrs' <- matchOrConvertToJoinIds bndrs
-  = do  { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
+  | Just pairs' <- matchOrConvertToJoinPoints pairs
+  = do  { let bndrs' = map fst pairs'
+              cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
                                                         bndrs' cont
         ; env1 <- simplRecJoinBndrs env cont_dup_res_ty bndrs'
                 -- NB: bndrs' don't have unfoldings or rules
@@ -1537,37 +1535,37 @@ simplRecE env pairs body cont
             ppr cont $$ blankLine $$
             ppr cont_dup $$ blankLine $$
             ppr cont_nodup)
-        ; let pairs' = bndrs' `zip` map snd pairs
         ; env3 <- simplRecBind env2 NotTopLevel (Just cont_dup) pairs'
         ; (env4, expr) <- simplExprF env3 body cont_dup
         ; rebuild (env4 `restoreJoinFloats` env1)
                   (wrapJoinFloats env4 expr) cont_nodup }
   | otherwise
-  = do  { MASSERT(all (not . isJoinId) bndrs)
+  = do  { let bndrs = map fst pairs
+        ; MASSERT(all (not . isJoinId) bndrs)
         ; env1 <- simplRecBndrs env bndrs
                 -- NB: bndrs' don't have unfoldings or rules
                 -- We add them as we go down
         ; env2 <- simplRecBind env1 NotTopLevel (Just cont) pairs
         ; simplExprF env2 body cont }
-  where
-    bndrs = map fst pairs
 
-matchOrConvertToJoinId :: CoreBndr -> Maybe CoreBndr
-matchOrConvertToJoinId bndr
+matchOrConvertToJoinPoint :: InBndr -> InExpr -> Maybe (InBndr, InExpr)
+matchOrConvertToJoinPoint bndr rhs
   | not (isId bndr)
   = Nothing
   | isJoinId bndr
-  = Just bndr
+  = Just (bndr, rhs)
   | AlwaysTailCalled join_arity <- tailCallInfo (idOccInfo bndr)
+  , (bndrs, body) <- etaExpandToJoinPoint join_arity rhs
   = -- No point in keeping tailCallInfo around; very fragile
-    Just $ maybeModifyIdInfo (zapTailCallInfo (idInfo bndr)) $
-             bndr `asJoinId` join_arity
+    Just (maybeModifyIdInfo (zapTailCallInfo (idInfo bndr)) $
+            bndr `asJoinId` join_arity,
+          mkLams bndrs body)
   | otherwise
   = Nothing
 
-matchOrConvertToJoinIds :: [CoreBndr] -> Maybe [CoreBndr]
-matchOrConvertToJoinIds bndrs
-  = mapM matchOrConvertToJoinId bndrs
+matchOrConvertToJoinPoints :: [(InBndr, InExpr)] -> Maybe [(InBndr, InExpr)]
+matchOrConvertToJoinPoints bndrs
+  = mapM (uncurry matchOrConvertToJoinPoint) bndrs
 
 {-
 ************************************************************************

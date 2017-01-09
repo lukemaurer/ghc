@@ -33,6 +33,7 @@ module CoreSyn (
         -- ** Simple 'Expr' access functions and predicates
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
         collectBinders, collectTyBinders, collectTyAndValBinders,
+        collectNBinders,
         collectArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
@@ -70,7 +71,8 @@ module CoreSyn (
         collectAnnArgs, collectAnnArgsTicks,
 
         -- ** Operations on annotations
-        deAnnotate, deAnnotate', deAnnotateBind, deAnnAlt, collectAnnBndrs,
+        deAnnotate, deAnnotate', deAnnotateBind, deAnnAlt,
+        collectAnnBndrs, collectNAnnBndrs,
 
         -- * Orphanhood
         IsOrphan(..), isOrphan, notOrphan, chooseOrphanAnchor,
@@ -1658,6 +1660,9 @@ collectBinders         :: Expr b   -> ([b],     Expr b)
 collectTyBinders       :: CoreExpr -> ([TyVar], CoreExpr)
 collectValBinders      :: CoreExpr -> ([Id],    CoreExpr)
 collectTyAndValBinders :: CoreExpr -> ([TyVar], [Id], CoreExpr)
+-- | Strip off exactly N leading lambdas (type or value). Good for use with
+-- join points.
+collectNBinders        :: Int -> Expr b -> ([b], Expr b)
 
 collectBinders expr
   = go [] expr
@@ -1682,6 +1687,13 @@ collectTyAndValBinders expr
   where
     (tvs, body1) = collectTyBinders expr
     (ids, body)  = collectValBinders body1
+
+collectNBinders orig_n orig_expr
+  = go orig_n [] orig_expr
+  where
+    go 0 bs expr      = (reverse bs, expr)
+    go n bs (Lam b e) = go (n-1) (b:bs) e
+    go _ _  _         = pprPanic "collectNBinders" $ int orig_n
 
 -- | Takes a nested application expression and returns the the function
 -- being applied and the arguments to which it is applied
@@ -1838,3 +1850,12 @@ collectAnnBndrs e
   where
     collect bs (_, AnnLam b body) = collect (b:bs) body
     collect bs body               = (reverse bs, body)
+
+-- | As 'collectNBinders' but for 'AnnExpr' rather than 'Expr'
+collectNAnnBndrs :: Int -> AnnExpr bndr annot -> ([bndr], AnnExpr bndr annot)
+collectNAnnBndrs orig_n e
+  = collect orig_n [] e
+  where
+    collect 0 bs body               = (reverse bs, body)
+    collect n bs (_, AnnLam b body) = collect (n-1) (b:bs) body
+    collect _ _  _                  = pprPanic "collectNBinders" $ int orig_n

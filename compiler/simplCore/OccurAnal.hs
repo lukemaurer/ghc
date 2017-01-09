@@ -22,7 +22,7 @@ module OccurAnal (
 import CoreSyn
 import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp,
-                          stripTicksTopE, mkTicks )
+                          stripTicksTopE, mkTicks, tryEtaReduce )
 import Id
 import IdInfo
 import Name( localiseName )
@@ -1235,7 +1235,7 @@ nodeScore old_bndr new_bndr bind_rhs lb_deps
          -- Data structures are more important than INLINE pragmas
          -- so that dictionary/method recursion unravels
 
-      _ | exprIsTrivial bind_rhs
+      _ | is_trivial
         -> mk_score 10  -- Practically certain to be inlined
           -- Used to have also: && not (isExportedId bndr)
           -- But I found this sometimes cost an extra iteration when we have
@@ -1265,6 +1265,15 @@ nodeScore old_bndr new_bndr bind_rhs lb_deps
                     | UnfIfGoodArgs { ug_size = size } <- guidance
                     -> size
                  _  -> cheapExprSize bind_rhs
+    is_trivial | exprIsTrivial bind_rhs          = True
+               | let (bndrs, body) = collectBinders bind_rhs
+               , Just _ <- tryEtaReduce bndrs body = True
+                   -- Join points are always eta-expanded. An otherwise trivial
+                   -- one like
+                   --   join j x1 x2 x3 = j' x1 x2 x3
+                   -- won't pass exprIsTrivial, but we certainly don't want to
+                   -- pick it as a loop breaker!
+               | otherwise                       = False
 
     id_unfolding = realIdUnfolding old_bndr
        -- realIdUnfolding: Ignore loop-breaker-ness here because
