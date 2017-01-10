@@ -22,7 +22,7 @@ module OccurAnal (
 import CoreSyn
 import CoreFVs
 import CoreUtils        ( exprIsTrivial, isDefaultAlt, isExpandableApp,
-                          stripTicksTopE, mkTicks, tryEtaReduce )
+                          stripTicksTopE, mkTicks )
 import Id
 import IdInfo
 import Name( localiseName )
@@ -1212,68 +1212,57 @@ nodeScore old_bndr new_bndr bind_rhs lb_deps
   | old_bndr `elemVarSet` lb_deps  -- Self-recursive things are great loop breakers
   = (0, 0, True)                   -- See Note [Self-recursion and loop breakers]
 
-  | otherwise  -- An Id has an unfolding
-  = case id_unfolding of
-      DFunUnfolding { df_args = args }
-        -- Never choose a DFun as a loop breaker
-        -- Note [DFuns should not be loop breakers]
-        -> (9, length args, is_lb)
+  | exprIsTrivial rhs
+  = mk_score 10  -- Practically certain to be inlined
+    -- Used to have also: && not (isExportedId bndr)
+    -- But I found this sometimes cost an extra iteration when we have
+    --      rec { d = (a,b); a = ...df...; b = ...df...; df = d }
+    -- where df is the exported dictionary. Then df makes a really
+    -- bad choice for loop breaker
 
-      CoreUnfolding { uf_src = src, uf_tmpl = unf_rhs, uf_guidance = guide }
-        | isStableSource src
-        -> case guide of
-             UnfWhen {}                      -> (6, cheapExprSize unf_rhs, is_lb)
-             UnfIfGoodArgs { ug_size = size} -> (3, size,                  is_lb)
-             UnfNever                        -> (0, 0,                     is_lb)
-              -- See Note [Loop breakers and INLINE/INLINABLE pragmas] for
-              -- the 6 vs 3 choice
+  | DFunUnfolding { df_args = args } <- id_unfolding
+    -- Never choose a DFun as a loop breaker
+    -- Note [DFuns should not be loop breakers]
+  = (9, length args, is_lb)
 
-         -- Note that this case hits /all/ stable unfoldings, so we
-         -- never look at 'bind_rhs' for stable unfoldings. That's right, because
-         -- 'rhs' is irrelevant for inlining things with a stable unfolding
+    -- Data structures are more important than INLINE pragmas
+    -- so that dictionary/method recursion unravels
 
-         -- Data structures are more important than INLINE pragmas
-         -- so that dictionary/method recursion unravels
+  | CoreUnfolding { uf_guidance = UnfWhen {} } <- id_unfolding
+  = mk_score 6
 
-      _ | is_trivial
-        -> mk_score 10  -- Practically certain to be inlined
-          -- Used to have also: && not (isExportedId bndr)
-          -- But I found this sometimes cost an extra iteration when we have
-          --      rec { d = (a,b); a = ...df...; b = ...df...; df = d }
-          -- where df is the exported dictionary. Then df makes a really
-          -- bad choice for loop breaker
+  | is_con_app rhs   -- Data types help with cases:
+  = mk_score 5       -- Note [Constructor applications]
 
-        | is_con_app bind_rhs   -- Data types help with cases: Note [Constructor applications]
-        -> mk_score 5
+  | isStableUnfolding id_unfolding
+  , canUnfold id_unfolding
+  = mk_score 3
 
-        | isOneOcc (idOccInfo new_bndr)
-        -> mk_score 2  -- Likely to be inlined
+  | isOneOcc (idOccInfo new_bndr)
+  = mk_score 2  -- Likely to be inlined
 
-        | canUnfold id_unfolding   -- The Id has some kind of unfolding
-        -> mk_score 1
+  | canUnfold id_unfolding  -- The Id has some kind of unfolding
+  = mk_score 1
 
-        | otherwise
-        -> (0, 0, is_lb)
+  | otherwise
+  = (0, 0, is_lb)
 
   where
     mk_score :: Int -> NodeScore
     mk_score rank = (rank, rhs_size, is_lb)
 
     is_lb    = isStrongLoopBreaker (idOccInfo old_bndr)
+    rhs      = case id_unfolding of
+                 CoreUnfolding { uf_src = src, uf_tmpl = unf_rhs }
+                    | isStableSource src
+                    -> unf_rhs
+                 _  -> bind_rhs
+       -- 'bind_rhs' is irrelevant for inlining things with a stable unfolding
     rhs_size = case id_unfolding of
                  CoreUnfolding { uf_guidance = guidance }
                     | UnfIfGoodArgs { ug_size = size } <- guidance
                     -> size
-                 _  -> cheapExprSize bind_rhs
-    is_trivial | exprIsTrivial bind_rhs          = True
-               | let (bndrs, body) = collectBinders bind_rhs
-               , Just _ <- tryEtaReduce bndrs body = True
-                   -- Join points are always eta-expanded. An otherwise trivial
-                   -- one like
-                   --   join j x1 x2 x3 = j' x1 x2 x3
-                   -- won't pass exprIsTrivial, but we certainly don't want to
-                   -- pick it as a loop breaker!
-               | otherwise                       = False
+                 _  -> cheapExprSize rhs
 
     id_unfolding = realIdUnfolding old_bndr
        -- realIdUnfolding: Ignore loop-breaker-ness here because
