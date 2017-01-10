@@ -416,13 +416,13 @@ isPrimOpId              :: Id -> Bool
 isFCallId               :: Id -> Bool
 isDataConWorkId         :: Id -> Bool
 isDFunId                :: Id -> Bool
-isJoinId                :: Id -> Bool
+isJoinId                :: Var -> Bool
 
 isClassOpId_maybe       :: Id -> Maybe Class
 isPrimOpId_maybe        :: Id -> Maybe PrimOp
 isFCallId_maybe         :: Id -> Maybe ForeignCall
 isDataConWorkId_maybe   :: Id -> Maybe DataCon
-isJoinId_maybe          :: Id -> Maybe JoinArity
+isJoinId_maybe          :: Var -> Maybe JoinArity
 
 isRecordSelector id = case Var.idDetails id of
                         RecSelId {}     -> True
@@ -472,13 +472,19 @@ isDataConWorkId_maybe id = case Var.idDetails id of
                         DataConWorkId con -> Just con
                         _                 -> Nothing
 
-isJoinId id = case Var.idDetails id of
+isJoinId id | isId id
+            = case Var.idDetails id of
                         JoinId {} -> True
                         _         -> False
+            | otherwise
+            = False
 
-isJoinId_maybe id = case Var.idDetails id of
+isJoinId_maybe id | isId id
+                  = case Var.idDetails id of
                         JoinId arity -> Just arity
                         _            -> Nothing
+                  | otherwise
+                  = Nothing
 
 idJoinArity :: JoinId -> JoinArity
 idJoinArity id = isJoinId_maybe id `orElse` pprPanic "idJoinArity" (ppr id)
