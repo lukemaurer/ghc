@@ -584,8 +584,12 @@ lintRhs bndr rhs
           fun_ty <- lintCoreExpr fun
           addLoc (AnExpr rhs') $ foldM lintCoreArg fun_ty args
   where
-    lint_join_lams 0 _ _ rhs
-      = lintCoreExpr rhs
+    (bndrs, body) = collectBinders rhs
+
+    lint_join_lams 0 tot _ rhs
+      = do { when (debugIsOn && all isDeadBinder (take tot bndrs)) $
+               check_for_floatable_joins rhs
+           ; lintCoreExpr rhs }
     lint_join_lams n tot enforce (Lam var expr)
       = addLoc (LambdaBodyOf var) $
         lintBinder var $ \ var' ->
@@ -597,6 +601,16 @@ lintRhs bndr rhs
       = markAllJoinsBad $ lintCoreExpr rhs
           -- Future join point, not yet eta-expanded
           -- Body is not a tail position
+
+    check_for_floatable_joins (Let bind body)
+      | bs@(b:_) <- bindersOf bind, isJoinId b
+      = addWarnL $ sep [ text "These join points are trivially floatable:"
+                       , ppr bs ]
+      | otherwise
+      = check_for_floatable_joins body -- could be joins hiding under values
+    check_for_floatable_joins _
+      = return ()
+
 
 -- Rejects applications of the data constructor @StaticPtr@ if it finds any.
 lintRhs _ rhs = markAllJoinsBad $ lintCoreExpr rhs
