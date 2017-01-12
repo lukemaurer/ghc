@@ -39,7 +39,7 @@ test('T1969',
              # 2013-11-13 17 (x86/Windows, 64bit machine)
              # 2015-07-11 21 (x86/Linux, 64bit machine) use +RTS -G1
              # 2016-04-06 30 (x86/Linux, 64bit machine)
-           (wordsize(64), 55, 20)]),
+           (wordsize(64), 78, 20)]),
              #            28 (amd64/Linux)
              #            34 (amd64/Linux)
              # 2012-09-20 23 (amd64/Linux)
@@ -51,6 +51,7 @@ test('T1969',
              # 2013-09-11 30, 15 (adapt to Phab CI)
              # 2015-06-03 41, (amd64/Linux) use +RTS -G1
              # 2015-10-28 55, (amd64/Linux) emit Typeable at definition site
+             # 2017-01-11 78, (amd64/Linux) Join points (#12988)
       compiler_stats_num_field('max_bytes_used',
           [(platform('i386-unknown-mingw32'), 5719436, 20),
                                  # 2010-05-17 5717704 (x86/Windows)
@@ -817,11 +818,11 @@ test('T9961',
 test('T9233',
     [ only_ways(['normal']),
       compiler_stats_num_field('bytes allocated',
-        [(wordsize(64), 1073084136, 5),
+        [(wordsize(64), 1127440160, 5),
          # 2015-08-04    999826288     initial value
          # 2016-04-14   1066246248     Final demand analyzer run
          # 2016-06-18    984268712     shuffling around of Data.Functor.Identity
-         # 2016-12-19   1073084136     Join points (#12988)
+         # 2017-01-11   1127440160     Join points (#12988)
          (wordsize(32),  515672240, 5)   # Put in your value here if you hit this
          # 2016-04-06    515672240     (x86/Linux) initial value
         ]),
@@ -833,7 +834,7 @@ test('T9233',
 test('T10370',
      [ only_ways(['optasm']),
        compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 33049168, 15),
+          [(wordsize(64), 39809904, 15),
           # 2015-10-22    19548720
           # 2016-02-24    22823976   Changing Levity to RuntimeRep; not sure why this regresses though, even after some analysis
           # 2016-04-14    28256896   final demand analyzer run
@@ -844,14 +845,16 @@ test('T10370',
           #     affected stats on bootstrapped GHC.  However,
           #     when I set -i0.01 with profiling, the heap profiles
           #     were identical, so I think it's just GC noise.
+          # 2017-01-11    39809904   Join points (#12988)
            (wordsize(32), 11371496, 15),
           # 2015-10-22    11371496
           ]),
        compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
-          [(wordsize(64), 121, 15),
+          [(wordsize(64), 148, 15),
           # 2015-10-22     76
           # 2016-04-14    101 final demand analyzer run
           # 2016-08-08    121 see above
+          # 2017-01-11    148 Join points (#12988)
            (wordsize(32),  39, 15),
           # 2015-10-22     39
           ]),
@@ -923,8 +926,9 @@ test('T13035',
 test('T13056',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-         [(wordsize(64), 520166912, 5),
+         [(wordsize(64), 580668760, 5),
          # 2017-01-06    520166912 initial
+         # 2017-01-11    580668760 Join points (#12988)
          ]),
      ],
      compile,

@@ -536,8 +536,9 @@ lvlMFE strict_ctxt env ann_expr
     lvlExpr env ann_expr
 
   | Just (wrap_float, wrap_use)
-       <- canFloat_maybe rhs_env strict_ctxt float_is_lam expr_ty
-  = do { expr1 <- lvlExpr rhs_env ann_expr
+       <- canFloat_maybe rhs_env strict_ctxt (float_is_lam || need_join) expr_ty
+  = do { expr1 <- if need_join then lvlExpr rhs_env ann_expr
+                               else lvlNonTailExpr rhs_env ann_expr
        ; let abs_expr = mkLams abs_vars_w_lvls (wrap_float expr1)
        ; var <- newLvlVar abs_expr join_arity_maybe
        ; let var2 = annotateBotStr var float_n_lams mb_bot_str
@@ -607,6 +608,7 @@ canFloat_maybe env strict_ctxt float_is_lam expr_ty
   | float_is_lam || not (isUnliftedType expr_ty)
   = Just (id, id) -- No wrapping needed if the type is lifted, or
                   -- if we are wrapping it in one or more value lambdas
+                  -- or making it a join point
 
   -- OK, so the float has an unlifted type and no value lambdas
   | strict_ctxt

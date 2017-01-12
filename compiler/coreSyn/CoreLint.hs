@@ -576,7 +576,7 @@ lintRhs bndr rhs
           fun_ty <- lintCoreExpr fun
           addLoc (AnExpr rhs') $ lintCoreArgs fun_ty args
   where
-    (bndrs, body) = collectBinders rhs
+    (bndrs, _body) = collectBinders rhs
 
     lint_join_lams 0 tot _ rhs
       = do { when (debugIsOn && all isDeadBinder (take tot bndrs)) $
