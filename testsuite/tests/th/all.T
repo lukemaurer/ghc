@@ -9,8 +9,9 @@ def f(name, opts):
 setTestOpts(f)
 setTestOpts(req_interp)
 # TH should work with -fexternal-interpreter too
-setTestOpts(extra_ways(['ext-interp']))
-setTestOpts(only_ways(['normal','ghci','ext-interp']))
+if config.have_ext_interp :
+       setTestOpts(extra_ways(['ext-interp']))
+       setTestOpts(only_ways(['normal','ghci','ext-interp']))
 
 test('TH_mkName', normal, compile, ['-v0'])
 test('TH_1tuple', normal, compile_fail, ['-v0'])
@@ -438,9 +439,12 @@ test('T12478_1', omit_ways(['ghci']), compile_and_run,
 test('T12478_2', omit_ways(['ghci']), compile_and_run, ['-v0'])
 test('T12478_3', omit_ways(['ghci']), compile, ['-v0'])
 test('T12478_4', omit_ways(['ghci']), compile_fail, ['-v0'])
+test('T12478_5', omit_ways(['ghci']), compile, ['-v0'])
 test('T12513', omit_ways(['ghci']), compile_fail, ['-v0'])
 test('T12530', normal, compile, ['-v0 -ddump-splices -dsuppress-uniques'])
 test('T12646', normal, compile, ['-v0'])
 test('T12788', extra_clean(['T12788_Lib.hi', 'T12788_Lib.o']),
                multimod_compile_fail,
                ['T12788.hs', '-v0 ' + config.ghc_th_way_flags])
+test('T12977', normal, compile, ['-v0'])
+test('T12993', normal, multimod_compile, ['T12993.hs', '-v0'])

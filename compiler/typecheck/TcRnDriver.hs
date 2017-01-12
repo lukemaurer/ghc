@@ -14,7 +14,6 @@ https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/TypeChecker
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module TcRnDriver (
-#ifdef GHCI
         tcRnStmt, tcRnExpr, TcRnExprMode(..), tcRnType,
         tcRnImportDecls,
         tcRnLookupRdrName,
@@ -22,7 +21,6 @@ module TcRnDriver (
         tcRnDeclsi,
         isGHCiMonad,
         runTcInteractive,    -- Used by GHC API clients (Trac #8878)
-#endif
         tcRnLookupName,
         tcRnGetInfo,
         tcRnModule, tcRnModuleTcRnM,
@@ -42,7 +40,6 @@ module TcRnDriver (
         missingBootThing,
     ) where
 
-#ifdef GHCI
 import {-# SOURCE #-} TcSplice ( finishTH )
 import RnSplice ( rnTopSpliceDecls, traceSplice, SpliceInfo(..) )
 import IfaceEnv( externaliseName )
@@ -54,6 +51,7 @@ import RnExpr
 import MkId
 import TidyPgm    ( globaliseAndTidyId )
 import TysWiredIn ( unitTy, mkListTy )
+#ifdef GHCI
 import DynamicLoading ( loadPlugins )
 import Plugins ( tcPlugin )
 #endif
@@ -68,6 +66,7 @@ import TcExpr
 import TcRnMonad
 import TcRnExports
 import TcEvidence
+import qualified BooleanFormula as BF
 import PprTyThing( pprTyThing )
 import MkIface( tyThingToIfaceDecl )
 import Coercion( pprCoAxiom )
@@ -269,6 +268,9 @@ tcRnModuleTcRnM hsc_env hsc_src
         tcg_env <- return (tcg_env { tcg_doc_hdr = maybe_doc_hdr }) ;
 
                 -- Report unused names
+                -- Do this /after/ type inference, so that when reporting
+                -- a function with no type signature we can give the
+                -- inferred type
         reportUnusedNames export_ies tcg_env ;
 
                 -- add extra source files to tcg_dependent_files
@@ -349,9 +351,9 @@ tcRnImports hsc_env import_decls
         ; let { dir_imp_mods = moduleEnvKeys
                              . imp_mods
                              $ imports }
-        ; checkFamInstConsistency (imp_finsts imports) dir_imp_mods ;
+        ; tcg_env <- checkFamInstConsistency (imp_finsts imports) dir_imp_mods ;
 
-        ; getGblEnv } }
+        ; return tcg_env } }
 
 {-
 ************************************************************************
@@ -392,14 +394,12 @@ tcRnSrcDecls explicit_mod_hdr decls
       ; new_ev_binds <- {-# SCC "simplifyTop" #-}
                         simplifyTop lie
 
-#ifdef GHCI
         -- Finalizers must run after constraints are simplified, or some types
         -- might not be complete when using reify (see #12777).
       ; (tcg_env, tcl_env) <- run_th_modfinalizers
       ; setEnvs (tcg_env, tcl_env) $ do {
 
       ; finishTH
-#endif /* GHCI */
 
       ; traceTc "Tc9" empty
 
@@ -436,12 +436,9 @@ tcRnSrcDecls explicit_mod_hdr decls
 
       ; setGlobalTypeEnv tcg_env' final_type_env
 
-#ifdef GHCI
    }
-#endif /* GHCI */
    } }
 
-#ifdef GHCI
 -- | Runs TH finalizers and renames and typechecks the top-level declarations
 -- that they could introduce.
 run_th_modfinalizers :: TcM (TcGblEnv, TcLclEnv)
@@ -467,7 +464,6 @@ run_th_modfinalizers = do
         )
         -- addTopDecls can add declarations which add new finalizers.
         run_th_modfinalizers
-#endif /* GHCI */
 
 tc_rn_src_decls :: [LHsDecl RdrName]
                 -> TcM (TcGblEnv, TcLclEnv)
@@ -482,7 +478,6 @@ tc_rn_src_decls ds
       ; (tcg_env, rn_decls) <- rnTopSrcDecls first_group
                 -- rnTopSrcDecls fails if there are any errors
 
-#ifdef GHCI
         -- Get TH-generated top-level declarations and make sure they don't
         -- contain any splices since we don't handle that at the moment
         --
@@ -515,7 +510,6 @@ tc_rn_src_decls ds
 
                     ; return (tcg_env, appendGroups rn_decls th_rn_decls)
                     }
-#endif /* GHCI */
 
       -- Type check all declarations
       ; (tcg_env, tcl_env) <- setGblEnv tcg_env $
@@ -526,12 +520,6 @@ tc_rn_src_decls ds
         case group_tail of
           { Nothing -> return (tcg_env, tcl_env)
 
-#ifndef GHCI
-            -- There shouldn't be a splice
-          ; Just (SpliceDecl {}, _) ->
-            failWithTc (text "Can't do a top-level splice; need a bootstrapped compiler")
-          }
-#else
             -- If there's a splice, we must carry on
           ; Just (SpliceDecl (L loc splice) _, rest_ds) ->
             do { recordTopLevelSpliceLoc loc
@@ -545,7 +533,6 @@ tc_rn_src_decls ds
                  tc_rn_src_decls (spliced_decls ++ rest_ds)
                }
           }
-#endif /* GHCI */
       }
 
 {-
@@ -919,9 +906,13 @@ checkBootTyCon is_boot tc1 tc2
            check (eqTypeX env op_ty1 op_ty2)
                  (text "The types of" <+> pname1 <+>
                   text "are different") `andThenCheck`
-           check (eqMaybeBy eqDM def_meth1 def_meth2)
-                 (text "The default methods associated with" <+> pname1 <+>
-                  text "are different")
+           if is_boot
+               then check (eqMaybeBy eqDM def_meth1 def_meth2)
+                          (text "The default methods associated with" <+> pname1 <+>
+                           text "are different")
+               else check (subDM op_ty1 def_meth1 def_meth2)
+                          (text "The default methods associated with" <+> pname1 <+>
+                           text "are not compatible")
          where
           name1 = idName id1
           name2 = idName id2
@@ -940,6 +931,26 @@ checkBootTyCon is_boot tc1 tc2
        eqDM (_, VanillaDM)    (_, VanillaDM)    = True
        eqDM (_, GenericDM t1) (_, GenericDM t2) = eqTypeX env t1 t2
        eqDM _ _ = False
+
+       -- NB: first argument is from hsig, second is from real impl.
+       -- Order of pattern matching matters.
+       subDM _ Nothing _ = True
+       subDM _ _ Nothing = False
+       -- If the hsig wrote:
+       --
+       --   f :: a -> a
+       --   default f :: a -> a
+       --
+       -- this should be validly implementable using an old-fashioned
+       -- vanilla default method.
+       subDM t1 (Just (_, GenericDM t2)) (Just (_, VanillaDM))
+        = eqTypeX env t1 t2
+       -- This case can occur when merging signatures
+       subDM t1 (Just (_, VanillaDM)) (Just (_, GenericDM t2))
+        = eqTypeX env t1 t2
+       subDM _ (Just (_, VanillaDM)) (Just (_, VanillaDM)) = True
+       subDM _ (Just (_, GenericDM t1)) (Just (_, GenericDM t2))
+        = eqTypeX env t1 t2
 
        -- Ignore the location of the defaults
        eqATDef Nothing             Nothing             = True
@@ -962,7 +973,9 @@ checkBootTyCon is_boot tc1 tc2
     check (eqListBy (eqTypeX env) sc_theta1 sc_theta2)
           (text "The class constraints do not match") `andThenCheck`
     checkListBy eqSig op_stuff1 op_stuff2 (text "methods") `andThenCheck`
-    checkListBy eqAT ats1 ats2 (text "associated types")
+    checkListBy eqAT ats1 ats2 (text "associated types") `andThenCheck`
+    check (classMinimalDef c1 `BF.implies` classMinimalDef c2)
+        (text "The MINIMAL pragmas are not compatible")
 
   | Just syn_rhs1 <- synTyConRhs_maybe tc1
   , Just syn_rhs2 <- synTyConRhs_maybe tc2
@@ -1053,6 +1066,8 @@ checkBootTyCon is_boot tc1 tc2
   = ASSERT(tc1 == tc2)
     let eqFamFlav OpenSynFamilyTyCon   OpenSynFamilyTyCon = True
         eqFamFlav (DataFamilyTyCon {}) (DataFamilyTyCon {}) = True
+        -- This case only happens for hsig merging:
+        eqFamFlav AbstractClosedSynFamilyTyCon AbstractClosedSynFamilyTyCon = True
         eqFamFlav AbstractClosedSynFamilyTyCon (ClosedSynFamilyTyCon {}) = True
         eqFamFlav (ClosedSynFamilyTyCon {}) AbstractClosedSynFamilyTyCon = True
         eqFamFlav (ClosedSynFamilyTyCon ax1) (ClosedSynFamilyTyCon ax2)
@@ -1064,8 +1079,11 @@ checkBootTyCon is_boot tc1 tc2
     in
     -- check equality of roles, family flavours and injectivity annotations
     check (roles1 == roles2) roles_msg `andThenCheck`
-    check (eqFamFlav fam_flav1 fam_flav2) empty `andThenCheck`
-    check (injInfo1 == injInfo2) empty
+    check (eqFamFlav fam_flav1 fam_flav2)
+        (ifPprDebug $
+            text "Family flavours" <+> ppr fam_flav1 <+> text "and" <+> ppr fam_flav2 <+>
+            text "do not match") `andThenCheck`
+    check (injInfo1 == injInfo2) (text "Injectivities do not match")
 
   | isAlgTyCon tc1 && isAlgTyCon tc2
   , Just env <- eqVarBndrs emptyRnEnv2 (tyConTyVars tc1) (tyConTyVars tc2)
@@ -1758,7 +1776,6 @@ lead to duplicate "perhaps you meant..." suggestions (e.g. T5564).
 We don't bother with the tcl_th_bndrs environment either.
 -}
 
-#ifdef GHCI
 -- | The returned [Id] is the list of new Ids bound by this statement. It can
 -- be used to extend the InteractiveContext via extendInteractiveContext.
 --
@@ -2260,7 +2277,6 @@ externaliseAndTidyId this_mod id
   = do { name' <- externaliseName this_mod (idName id)
        ; return (globaliseAndTidyId (setIdName id name')) }
 
-#endif /* GHCi */
 
 {-
 ************************************************************************
@@ -2270,7 +2286,6 @@ externaliseAndTidyId this_mod id
 ************************************************************************
 -}
 
-#ifdef GHCI
 -- | ASSUMES that the module is either in the 'HomePackageTable' or is
 -- a package module with an interface on disk.  If neither of these is
 -- true, then the result will be an error indicating the interface
@@ -2294,7 +2309,6 @@ tcRnLookupRdrName hsc_env (L loc rdr_name)
        ; let names = concat names_s
        ; when (null names) (addErrTc (text "Not in scope:" <+> quotes (ppr rdr_name)))
        ; return names }
-#endif
 
 tcRnLookupName :: HscEnv -> Name -> IO (Messages, Maybe TyThing)
 tcRnLookupName hsc_env name

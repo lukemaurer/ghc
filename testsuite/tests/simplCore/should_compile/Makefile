@@ -7,9 +7,21 @@ T3990:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T3990.hs | grep 'test_case'
         # Grep output should show an unpacked constructor
 
+T9509:
+	$(RM) -f T9509*.o T9509*.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T9509a.hs
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T9509.hs -funfolding-use-threshold=20 \
+              -ddump-rule-rewrites | grep SPEC
+        # Grep output should show a SPEC rule firing
+        # The unfolding use threshold is to prevent foo inlining before it is specialised
+
 T8832:
 	$(RM) -f T8832.o T8832.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) $(T8832_WORDSIZE_OPTS) -O -c -ddump-simpl T8832.hs | grep '^[a-zA-Z0-9]\+ ='
+
+T12603:
+	$(RM) -f T8832.o T8832.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl -dsuppress-uniques T12603.hs | grep 'wf1'
 
 T11155:
 	$(RM) -f T11155.o T11155.hi
@@ -155,3 +167,13 @@ T5615:
 	-grep 'quotInt#' T5615.dump-simpl
 	-grep 'remInt#' T5615.dump-simpl
 	grep -c '1999#' T5615.dump-simpl
+
+# When this one works there are no 'plusWord' left at all
+T12877:
+	-('$(TEST_HC)' $(TEST_HC_OPTS) -c -O T12877.hs -ddump-simpl | grep 'plusWord')
+
+T13025:
+	$(RM) -f T13025.o T13025.hi T13025a.o T13025a.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025a.hs
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c HEq_sc
+	# No lines should match 'HEq_sc' so wc should output zeros

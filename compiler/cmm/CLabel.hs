@@ -946,13 +946,13 @@ idInfoLabelType info =
 -- @labelDynamic@ returns @True@ if the label is located
 -- in a DLL, be it a data reference or not.
 
-labelDynamic :: DynFlags -> UnitId -> Module -> CLabel -> Bool
-labelDynamic dflags this_pkg this_mod lbl =
+labelDynamic :: DynFlags -> Module -> CLabel -> Bool
+labelDynamic dflags this_mod lbl =
   case lbl of
    -- is the RTS in a DLL or not?
    RtsLabel _           -> (WayDyn `elem` ways dflags) && (this_pkg /= rtsUnitId)
 
-   IdLabel n _ _        -> isDllName dflags this_pkg this_mod n
+   IdLabel n _ _        -> isDllName dflags this_mod n
 
    -- When compiling in the "dyn" way, each package is to be linked into
    -- its own shared library.
@@ -989,7 +989,9 @@ labelDynamic dflags this_pkg this_mod lbl =
 
    -- Note that DynamicLinkerLabels do NOT require dynamic linking themselves.
    _                 -> False
-  where os = platformOS (targetPlatform dflags)
+  where
+    os = platformOS (targetPlatform dflags)
+    this_pkg = moduleUnitId this_mod
 
 
 -----------------------------------------------------------------------------
@@ -1113,8 +1115,8 @@ pprAsmCLbl _ lbl
    = pprCLbl lbl
 
 pprCLbl :: CLabel -> SDoc
-pprCLbl (StringLitLabel _)
-  = panic "pprCLbl StringLitLabel"
+pprCLbl (StringLitLabel u)
+  = pprUnique u <> text "_str"
 
 pprCLbl (CaseLabel u CaseReturnPt)
   = hcat [pprUnique u, text "_ret"]

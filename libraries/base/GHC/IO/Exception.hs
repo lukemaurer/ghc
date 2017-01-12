@@ -129,12 +129,12 @@ allocationLimitExceeded = toException AllocationLimitExceeded
 
 -----
 
--- |Compaction found an object that cannot be compacted.  Functions
+-- | Compaction found an object that cannot be compacted.  Functions
 -- cannot be compacted, nor can mutable objects or pinned objects.
 -- See 'Data.Compact.compact'.
 --
 -- @since 4.10.0.0
-data CompactionFailed = CompactionFailed String
+newtype CompactionFailed = CompactionFailed String
 
 -- | @since 4.10.0.0
 instance Exception CompactionFailed where
@@ -207,8 +207,15 @@ data AsyncException
         -- live data it has. Notes:
         --
         --   * It is undefined which thread receives this exception.
+        --     GHC currently throws this to the same thread that
+        --     receives 'UserInterrupt', but this may change in the
+        --     future.
         --
-        --   * GHC currently does not throw 'HeapOverflow' exceptions.
+        --   * The GHC RTS currently can only recover from heap overflow
+        --     if it detects that an explicit memory limit (set via RTS flags).
+        --     has been exceeded.  Currently, failure to allocate memory from
+        --     the operating system results in immediate termination of the
+        --     program.
   | ThreadKilled
         -- ^This exception is raised by another thread
         -- calling 'Control.Concurrent.killThread', or by the system

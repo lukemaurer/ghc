@@ -809,11 +809,12 @@ simplEnvForGHCi dflags
 updModeForStableUnfoldings :: Activation -> SimplifierMode -> SimplifierMode
 -- See Note [Simplifying inside stable unfoldings]
 updModeForStableUnfoldings inline_rule_act current_mode
-  = current_mode { sm_phase = phaseFromActivation inline_rule_act
-                 , sm_inline = True
+  = current_mode { sm_phase      = phaseFromActivation inline_rule_act
+                 , sm_inline     = True
                  , sm_eta_expand = False }
-                 -- For sm_rules, just inherit; sm_rules might be "off"
-                 -- because of -fno-enable-rewrite-rules
+                     -- sm_eta_expand: see Note [No eta expansion in stable unfoldings]
+       -- For sm_rules, just inherit; sm_rules might be "off"
+       -- because of -fno-enable-rewrite-rules
   where
     phaseFromActivation (ActiveAfter _ n) = Phase n
     phaseFromActivation _                 = InitialPhase
@@ -837,6 +838,25 @@ Ticks into the LHS, which makes matching trickier. Trac #10665, #10745.
 
 Doing this to either side confounds tools like HERMIT, which seek to reason
 about and apply the RULES as originally written. See Trac #10829.
+
+Note [No eta expansion in stable unfoldings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have a stable unfolding
+
+  f :: Ord a => a -> IO ()
+  -- Unfolding template
+  --    = /\a \(d:Ord a) (x:a). bla
+
+we do not want to eta-expand to
+
+  f :: Ord a => a -> IO ()
+  -- Unfolding template
+  --    = (/\a \(d:Ord a) (x:a) (eta:State#). bla eta) |> co
+
+because not specialisation of the overloading doesn't work properly
+(see Note [Specialisation shape] in Specialise), Trac #9509.
+
+So we disable eta-expansion in stable unfoldings.
 
 Note [Inlining in gentle mode]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1258,7 +1278,6 @@ postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
   | not active                  = False
   | isWeakLoopBreaker occ_info  = False -- If it's a loop-breaker of any kind, don't inline
                                         -- because it might be referred to "earlier"
-  | isExportedId bndr           = False
   | isStableUnfolding unfolding = False -- Note [Stable unfoldings and postInlineUnconditionally]
   | isTopLevel top_lvl          = False -- Note [Top level and postInlineUnconditionally]
   | exprIsTrivial rhs           = True
@@ -1353,6 +1372,10 @@ ones that are trivial):
 
   * The inliner should inline trivial things at call sites anyway.
 
+  * The Id might be exported.  We could check for that separately,
+    but since we aren't going to postInlineUnconditionally /any/
+    top-level bindings, we don't need to test.
+
 Note [Stable unfoldings and postInlineUnconditionally]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Do not do postInlineUnconditionally if the Id has an stable unfolding,
@@ -1380,16 +1403,16 @@ won't inline because 'e' is too big.
 ************************************************************************
 -}
 
-mkLam :: [OutBndr] -> OutExpr -> SimplCont -> SimplM OutExpr
+mkLam :: SimplEnv -> [OutBndr] -> OutExpr -> SimplCont -> SimplM OutExpr
 -- mkLam tries three things
 --      a) eta reduction, if that gives a trivial expression
 --      b) eta expansion [only if there are some value lambdas]
 
-mkLam [] body _cont
+mkLam _env [] body _cont
   = return body
-mkLam bndrs body cont
-  = do  { dflags <- getDynFlags
-        ; mkLam' dflags bndrs body }
+mkLam env bndrs body cont
+  = do { dflags <- getDynFlags
+       ; mkLam' dflags bndrs body }
   where
     mkLam' :: DynFlags -> [OutBndr] -> OutExpr -> SimplM OutExpr
     mkLam' dflags bndrs (Cast body co)
@@ -1417,7 +1440,7 @@ mkLam bndrs body cont
            ; return etad_lam }
 
       | not (contIsRhs cont)   -- See Note [Eta-expanding lambdas]
-      , gopt Opt_DoLambdaEtaExpansion dflags
+      , sm_eta_expand (getMode env)
       , any isRuntimeVar bndrs
       , let body_arity = exprEtaExpandArity dflags body
       , body_arity > 0
@@ -1448,6 +1471,9 @@ However, when the lambda is let-bound, as the RHS of a let, we have a
 better eta-expander (in the form of tryEtaExpandRhs), so we don't
 bother to try expansion in mkLam in that case; hence the contIsRhs
 guard.
+
+NB: We check the SimplEnv (sm_eta_expand), not DynFlags.
+    See Note [No eta expansion in stable unfoldings]
 
 Note [Casts and lambdas]
 ~~~~~~~~~~~~~~~~~~~~~~~~

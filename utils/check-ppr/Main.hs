@@ -20,12 +20,20 @@ import System.FilePath
 import qualified Data.ByteString as B
 import qualified Data.Map        as Map
 
-main::IO()
+usage :: String
+usage = unlines
+    [ "usage: check-ppr (libdir) (file)"
+    , ""
+    , "where libdir is the GHC library directory (e.g. the output of"
+    , "ghc --print-libdir) and file is the file to parse."
+    ]
+
+main :: IO()
 main = do
   args <- getArgs
   case args of
    [libdir,fileName] -> testOneFile libdir fileName
-   _ -> putStrLn "invoke with the libdir and a file to parse."
+   _ -> putStrLn usage
 
 testOneFile :: FilePath -> String -> IO ()
 testOneFile libdir fileName = do
@@ -38,6 +46,7 @@ testOneFile libdir fileName = do
 
          newFile = dropExtension fileName <.> "ppr" <.> takeExtension fileName
          astFile = fileName <.> "ast"
+         newAstFile = fileName <.> "ast.new"
 
        writeFile astFile origAst
        writeFile newFile pped
@@ -45,6 +54,7 @@ testOneFile libdir fileName = do
        p' <- parseOneFile libdir newFile
 
        let newAstStr = showAstData 0 (pm_parsed_source p')
+       writeFile newAstFile newAstStr
 
        if origAst == newAstStr
          then do
@@ -116,10 +126,10 @@ showAstData n =
         space "" = ""
         space s  = ' ':s
         indent i = "\n" ++ replicate i ' '
-        string     = show :: String -> String
-        fastString = ("{FastString: "++) . (++"}") . show
+        string     = normalize_newlines . show :: String -> String
+        fastString = ("{FastString: "++) . (++"}") . normalize_newlines . show
                    :: FastString -> String
-        bytestring = show :: B.ByteString -> String
+        bytestring = normalize_newlines . show :: B.ByteString -> String
         list l     = indent n ++ "["
                               ++ intercalate "," (map (showAstData (n+1)) l)
                               ++ "]"
@@ -163,11 +173,16 @@ showAstData n =
                   ++ showAstData (n+1) a
                   ++ ")"
 
+normalize_newlines :: String -> String
+normalize_newlines ('\\':'r':'\\':'n':xs) = '\\':'n':normalize_newlines xs
+normalize_newlines (x:xs)                 = x:normalize_newlines xs
+normalize_newlines []                     = []
+
 showSDoc_ :: SDoc -> String
-showSDoc_ = showSDoc unsafeGlobalDynFlags
+showSDoc_ = normalize_newlines . showSDoc unsafeGlobalDynFlags
 
 showSDocDebug_ :: SDoc -> String
-showSDocDebug_ = showSDocDebug unsafeGlobalDynFlags
+showSDocDebug_ = normalize_newlines . showSDocDebug unsafeGlobalDynFlags
 
 -- ---------------------------------------------------------------------
 

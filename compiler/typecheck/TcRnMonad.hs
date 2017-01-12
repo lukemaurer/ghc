@@ -124,6 +124,7 @@ module TcRnMonad(
   failIfM,
   forkM_maybe,
   forkM,
+  setImplicitEnvM,
 
   withException,
 
@@ -177,10 +178,8 @@ import Control.Monad
 import Data.Set ( Set )
 import qualified Data.Set as Set
 
-#ifdef GHCI
 import {-# SOURCE #-} TcSplice ( runRemoteModFinalizers )
 import qualified Data.Map as Map
-#endif
 
 {-
 ************************************************************************
@@ -218,13 +217,11 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
 
         dependent_files_var <- newIORef [] ;
         static_wc_var       <- newIORef emptyWC ;
-#ifdef GHCI
         th_topdecls_var      <- newIORef [] ;
         th_topnames_var      <- newIORef emptyNameSet ;
         th_modfinalizers_var <- newIORef [] ;
         th_state_var         <- newIORef Map.empty ;
         th_remote_state_var  <- newIORef Nothing ;
-#endif /* GHCI */
         let {
              dflags = hsc_dflags hsc_env ;
 
@@ -234,13 +231,11 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 | otherwise      = Nothing ;
 
              gbl_env = TcGblEnv {
-#ifdef GHCI
                 tcg_th_topdecls      = th_topdecls_var,
                 tcg_th_topnames      = th_topnames_var,
                 tcg_th_modfinalizers = th_modfinalizers_var,
                 tcg_th_state         = th_state_var,
                 tcg_th_remote_state  = th_remote_state_var,
-#endif /* GHCI */
 
                 tcg_mod            = mod,
                 tcg_semantic_mod   =
@@ -258,6 +253,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_type_env_var   = type_env_var,
                 tcg_inst_env       = emptyInstEnv,
                 tcg_fam_inst_env   = emptyFamInstEnv,
+                tcg_pending_fam_checks = emptyNameEnv,
                 tcg_ann_env        = emptyAnnEnv,
                 tcg_th_used        = th_var,
                 tcg_th_splice_used = th_splice_var,
@@ -1083,13 +1079,8 @@ failIfErrsM :: TcRn ()
 -- Useful to avoid error cascades
 failIfErrsM = ifErrsM failM (return ())
 
-#ifdef GHCI
 checkTH :: a -> String -> TcRn ()
 checkTH _ _ = return () -- OK
-#else
-checkTH :: Outputable a => a -> String -> TcRn ()
-checkTH e what = failTH e what  -- Raise an error in a stage-1 compiler
-#endif
 
 failTH :: Outputable a => a -> String -> TcRn x
 failTH e what  -- Raise an error in a stage-1 compiler
@@ -1610,7 +1601,6 @@ getStageAndBindLevel name
 setStage :: ThStage -> TcM a -> TcRn a
 setStage s = updLclEnv (\ env -> env { tcl_th_ctxt = s })
 
-#ifdef GHCI
 -- | Adds the given modFinalizers to the global environment and set them to use
 -- the current local environment.
 addModFinalizersWithLclEnv :: ThModFinalizers -> TcM ()
@@ -1620,10 +1610,6 @@ addModFinalizersWithLclEnv mod_finalizers
        updTcRef th_modfinalizers_var $ \fins ->
          setLclEnv lcl_env (runRemoteModFinalizers mod_finalizers)
          : fins
-#else
-addModFinalizersWithLclEnv :: ThModFinalizers -> TcM ()
-addModFinalizersWithLclEnv ThModFinalizers = return ()
-#endif
 
 {-
 ************************************************************************
@@ -1685,6 +1671,7 @@ mkIfLclEnv mod loc boot
                                 if_loc     = loc,
                                 if_boot    = boot,
                                 if_nsubst  = Nothing,
+                                if_implicits_env = Nothing,
                                 if_tv_env  = emptyFsEnv,
                                 if_id_env  = emptyFsEnv }
 
@@ -1814,6 +1801,9 @@ forkM doc thing_inside
                         Nothing -> pgmError "Cannot continue after interface file error"
                                    -- pprPanic "forkM" doc
                         Just r  -> r) }
+
+setImplicitEnvM :: TypeEnv -> IfL a -> IfL a
+setImplicitEnvM tenv m = updLclEnv (\lcl -> lcl { if_implicits_env = Just tenv }) m
 
 {-
 Note [Masking exceptions in forkM_maybe]

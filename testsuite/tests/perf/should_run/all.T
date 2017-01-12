@@ -191,12 +191,17 @@ test('T5205',
      [stats_num_field('bytes allocated',
                       [(wordsize(32), 47088, 5),
                     # expected value: 47088 (x86/Darwin)
-                       (wordsize(64), 56208, 7)]),
+
+                       (platform('x86_64-unknown-mingw32'), 52264, 5),
+                    # 2016-12-14: 52264 (Separate out Windows results)
+
+                       (wordsize(64), 56208, 5)]),
                     # expected value: 51320 (amd64/Linux)
                     # 2014-07-17:     52600 (amd64/Linux) general round of updates
                     # 2015-04-03: Widen 5->7% (amd64/Windows was doing better)
                     # 2015-08-15: 50648 (Windows too good. avg of Windows&Linux)
                     # 2015-10-30: 56208 (D757: Emit Typeable at definition site)
+                    # 2016-12-14: Narrow 7->5% (Separate out Windows results)
       only_ways(['normal', 'optasm'])
       ],
      compile_and_run,
@@ -442,3 +447,28 @@ test('T9339',
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
+
+test('T12996',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(64),    76776, 5) ]),
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T13001',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(32),    46728, 20)
+                      , (wordsize(64),    50600, 20) ]),
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T12990',
+    [stats_num_field('bytes allocated',
+                     [ (wordsize(64), 21640904, 5) ]),
+                     # 2017-01-03     34440936  w/o inlining unsaturated
+                     #                          constructor wrappers
+                     # 2017-01-03     21640904 inline wrappers
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])

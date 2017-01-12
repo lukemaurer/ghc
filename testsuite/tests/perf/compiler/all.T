@@ -502,7 +502,7 @@ test('T5321Fun',
              # 2014-09-03: 299656164     (specialisation and inlining)
              # 10/12/2014: 206406188     #  Improvements in constraint solver
              # 2016-04-06: 279922360 x86/Linux
-            (wordsize(64), 565883176, 10)])
+            (wordsize(64), 497356688, 5)])
              # prev:       585521080
              # 29/08/2012: 713385808     #  (increase due to new codegen)
              # 15/05/2013: 628341952     #  (reason for decrease unknown)
@@ -516,6 +516,9 @@ test('T5321Fun',
              #  (undefined now takes an implicit parameter and GHC -O0 does
              #  not recognize that the application is bottom)
              # 11/12/2015: 565883176     #  TypeInType (see #11196)
+             # 06/01/2017: 497356688     #  Small coercion optimisations
+                                         #  The actual decrease was only 2%; earlier
+                                         #    commits had drifted down
       ],
       compile,[''])
 
@@ -872,9 +875,11 @@ test('T10547',
 test('T12227',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 1822822016, 5),
+          [(wordsize(64), 1715827784, 5),
           # 2016-07-11    5650186880 (Windows) before fix for #12227
           # 2016-07-11    1822822016 (Windows) after fix for #12227
+          # 2016-12-20    1715827784 after d250d493 (INLINE in Traversable dms)
+          #                          (or thereabouts in the commit history)
           ]),
      ],
      compile,
@@ -895,7 +900,9 @@ test('T12425',
 test('T12234',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 76970928, 5),
+          [(platform('x86_64-unknown-mingw32'), 77949232, 5),
+          # initial:    77949232
+           (wordsize(64), 76970928, 5),
           # initial:    72958288
           # 2017-01-10  76970928 x86_64/Linux Join points (#12988)
           ]),
@@ -903,16 +910,31 @@ test('T12234',
      compile,
      [''])
 
-test('T12877',
-     [ stats_num_field('bytes allocated',
-          [(wordsize(64), 197582248, 5),
-          # initial:      197582248 (Linux)
-          ])
-     , compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 135979000, 5),
-          # initial:      135979000 (Linux)
+test('T13035',
+     [ only_ways(['normal']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 90595208, 5),
+          # 2017-01-05   90595208 initial
           ]),
      ],
-     compile_and_run,
-     ['-O2'])
+     compile,
+     [''] )
 
+test('T13056',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+         [(wordsize(64), 520166912, 5),
+         # 2017-01-06    520166912 initial
+         ]),
+     ],
+     compile,
+     ['-O1'])
+
+test('T12707',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 1271577192, 5),
+          # initial:    1271577192
+          ]),
+     ],
+     compile,
+     [''])

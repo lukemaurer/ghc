@@ -24,8 +24,11 @@ module StgSyn (
         combineStgBinderInfo,
 
         -- a set of synonyms for the most common (only :-) parameterisation
-        StgArg,
-        StgBinding, StgExpr, StgRhs, StgAlt,
+        StgArg, StgBinding, StgExpr, StgRhs, StgAlt,
+
+        -- a set of synonyms to distinguish in- and out variants
+        InStgArg,  InStgBinding,  InStgExpr,  InStgRhs,  InStgAlt,
+        OutStgArg, OutStgBinding, OutStgExpr, OutStgRhs, OutStgAlt,
 
         -- StgOp
         StgOp(..),
@@ -98,17 +101,15 @@ data GenStgArg occ
 isDllConApp :: DynFlags -> Module -> DataCon -> [StgArg] -> Bool
 isDllConApp dflags this_mod con args
  | platformOS (targetPlatform dflags) == OSMinGW32
-    = isDllName dflags this_pkg this_mod (dataConName con) || any is_dll_arg args
+    = isDllName dflags this_mod (dataConName con) || any is_dll_arg args
  | otherwise = False
   where
     -- NB: typePrimRep is legit because any free variables won't have
     -- unlifted type (there are no unlifted things at top level)
     is_dll_arg :: StgArg -> Bool
     is_dll_arg (StgVarArg v) =  isAddrRep (typePrimRep (idType v))
-                             && isDllName dflags this_pkg this_mod (idName v)
+                             && isDllName dflags this_mod (idName v)
     is_dll_arg _             = False
-
-    this_pkg = thisPackage dflags
 
 -- True of machine addresses; these are the things that don't
 -- work across DLLs. The key point here is that VoidRep comes
@@ -553,7 +554,24 @@ type StgExpr     = GenStgExpr     Id Id
 type StgRhs      = GenStgRhs      Id Id
 type StgAlt      = GenStgAlt      Id Id
 
+{- Many passes apply a substitution, and it's very handy to have type
+   synonyms to remind us whether or not the subsitution has been applied.
+   See CoreSyn for precedence in Core land
+-}
+
+type InStgBinding  = StgBinding
+type InStgArg      = StgArg
+type InStgExpr     = StgExpr
+type InStgRhs      = StgRhs
+type InStgAlt      = StgAlt
+type OutStgBinding = StgBinding
+type OutStgArg     = StgArg
+type OutStgExpr    = StgExpr
+type OutStgRhs     = StgRhs
+type OutStgAlt     = StgAlt
+
 {-
+
 ************************************************************************
 *                                                                      *
 \subsubsection[UpdateFlag-datatype]{@UpdateFlag@}

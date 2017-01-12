@@ -53,7 +53,7 @@ test('haddock.base',
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 22073257152, 5)
+          [(wordsize(64), 25478853176 , 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -92,7 +92,8 @@ test('haddock.Cabal',
             # 2016-10-01: 20619433656 (amd64/Linux) - Cabal update
             # 2016-10-03: 21554874976 (amd64/Linux) - Cabal update
             # 2016-10-06: 23706190072 (amd64/Linux) - Cabal update
-            # 2016-12-19: 22073257152 (amd64/Linux) - Join points (#12988)
+            # 2016-12-20: 25478853176 (amd64/Linux) - Cabal update
+
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
             # 2013-02-10:                     1906532680 (x86/Windows)

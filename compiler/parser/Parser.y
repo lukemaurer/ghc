@@ -316,6 +316,48 @@ correctly, see the README in (REPO)/utils/check-api-annotations for details on
 how to set up a test using the check-api-annotations utility, and interpret the
 output it generates.
 
+Note [Parsing lists]
+---------------------
+You might be wondering why we spend so much effort encoding our lists this
+way:
+
+importdecls
+        : importdecls ';' importdecl
+        | importdecls ';'
+        | importdecl
+        | {- empty -}
+
+This might seem like an awfully roundabout way to declare a list; plus, to add
+insult to injury you have to reverse the results at the end.  The answer is that
+left recursion prevents us from running out of stack space when parsing long
+sequences.  See: https://www.haskell.org/happy/doc/html/sec-sequences.html for
+more guidance.
+
+By adding/removing branches, you can affect what lists are accepted.  Here
+are the most common patterns, rewritten as regular expressions for clarity:
+
+    -- Equivalent to: ';'* (x ';'+)* x?  (can be empty, permits leading/trailing semis)
+    xs : xs ';' x
+       | xs ';'
+       | x
+       | {- empty -}
+
+    -- Equivalent to x (';' x)* ';'*  (non-empty, permits trailing semis)
+    xs : xs ';' x
+       | xs ';'
+       | x
+
+    -- Equivalent to ';'* alts (';' alts)* ';'* (non-empty, permits leading/trailing semis)
+    alts : alts1
+         | ';' alts
+    alts1 : alts1 ';' alt
+          | alts1 ';'
+          | alt
+
+    -- Equivalent to x (',' x)+ (non-empty, no trailing semis)
+    xs : x
+       | x ',' xs
+
 -- -----------------------------------------------------------------------------
 
 -}
@@ -601,7 +643,12 @@ unitdecl :: { LHsUnitDecl PackageName }
              { sL1 $2 $ DeclD SignatureD $3 Nothing }
         | 'dependency' unitid mayberns
              { sL1 $1 $ IncludeD (IncludeDecl { idUnitId = $2
-                                              , idModRenaming = $3 }) }
+                                              , idModRenaming = $3
+                                              , idSignatureInclude = False }) }
+        | 'dependency' 'signature' unitid
+             { sL1 $1 $ IncludeD (IncludeDecl { idUnitId = $3
+                                              , idModRenaming = Nothing
+                                              , idSignatureInclude = True }) }
 
 -----------------------------------------------------------------------------
 -- Module Header
@@ -665,22 +712,15 @@ body2   :: { ([AddAnn]
                                                    :(fst $2), snd $2) }
         |  missing_module_keyword top close     { ([],snd $2) }
 
+
 top     :: { ([AddAnn]
              ,([LImportDecl RdrName], [LHsDecl RdrName])) }
-        : importdecls                   { (fst $1
-                                          ,(reverse $ snd $1,[]))}
-        | importdecls ';' cvtopdecls    {% if null (snd $1)
-                                             then return ((mj AnnSemi $2:(fst $1))
-                                                         ,(reverse $ snd $1,$3))
-                                             else do
-                                              { addAnnotation (gl $ head $ snd $1)
-                                                              AnnSemi (gl $2)
-                                              ; return (fst $1
-                                                       ,(reverse $ snd $1,$3)) }}
-        | cvtopdecls                    { ([],([],$1)) }
+        : semis top1                            { ($1, $2) }
 
-cvtopdecls :: { [LHsDecl RdrName] }
-        : topdecls                              { cvTopDecls $1 }
+top1    :: { ([LImportDecl RdrName], [LHsDecl RdrName]) }
+        : importdecls_semi topdecls_semi        { (reverse $1, cvTopDecls $2) }
+        | importdecls_semi topdecls             { (reverse $1, cvTopDecls $2) }
+        | importdecls                           { (reverse $1, []) }
 
 -----------------------------------------------------------------------------
 -- Module declaration & imports only
@@ -700,12 +740,19 @@ header  :: { Located (HsModule RdrName) }
                           Nothing)) }
 
 header_body :: { [LImportDecl RdrName] }
-        :  '{'            importdecls           { snd $2 }
-        |      vocurly    importdecls           { snd $2 }
+        :  '{'            header_top            { $2 }
+        |      vocurly    header_top            { $2 }
 
 header_body2 :: { [LImportDecl RdrName] }
-        :  '{' importdecls                      { snd $2 }
-        |  missing_module_keyword importdecls   { snd $2 }
+        :  '{' header_top                       { $2 }
+        |  missing_module_keyword header_top    { $2 }
+
+header_top :: { [LImportDecl RdrName] }
+        :  semis header_top_importdecls         { $2 }
+
+header_top_importdecls :: { [LImportDecl RdrName] }
+        :  importdecls_semi                     { $1 }
+        |  importdecls                          { $1 }
 
 -----------------------------------------------------------------------------
 -- The Export List
@@ -792,25 +839,31 @@ qcname  :: { Located RdrName }  -- Variable or type constructor
 -----------------------------------------------------------------------------
 -- Import Declarations
 
--- import decls can be *empty*, or even just a string of semicolons
--- whereas topdecls must contain at least one topdecl.
+-- importdecls and topdecls must contain at least one declaration;
+-- top handles the fact that these may be optional.
 
-importdecls :: { ([AddAnn],[LImportDecl RdrName]) }
-        : importdecls ';' importdecl
-                                {% if null (snd $1)
-                                     then return (mj AnnSemi $2:fst $1,$3 : snd $1)
-                                     else do
-                                      { addAnnotation (gl $ head $ snd $1)
-                                                      AnnSemi (gl $2)
-                                      ; return (fst $1,$3 : snd $1) } }
-        | importdecls ';'       {% if null (snd $1)
-                                     then return ((mj AnnSemi $2:fst $1),snd $1)
-                                     else do
-                                       { addAnnotation (gl $ head $ snd $1)
-                                                       AnnSemi (gl $2)
-                                       ; return $1} }
-        | importdecl             { ([],[$1]) }
-        | {- empty -}            { ([],[]) }
+-- One or more semicolons
+semis1  :: { [AddAnn] }
+semis1  : semis1 ';'  { mj AnnSemi $2 : $1 }
+        | ';'         { [mj AnnSemi $1] }
+
+-- Zero or more semicolons
+semis   :: { [AddAnn] }
+semis   : semis ';'   { mj AnnSemi $2 : $1 }
+        | {- empty -} { [] }
+
+-- No trailing semicolons, non-empty
+importdecls :: { [LImportDecl RdrName] }
+importdecls
+        : importdecls_semi importdecl
+                                { $2 : $1 }
+
+-- May have trailing semicolons, can be empty
+importdecls_semi :: { [LImportDecl RdrName] }
+importdecls_semi
+        : importdecls_semi importdecl semis1
+                                {% ams $2 $3 >> return ($2 : $1) }
+        | {- empty -}           { [] }
 
 importdecl :: { LImportDecl RdrName }
         : 'import' maybe_src maybe_safe optqualified maybe_pkg modid maybeas maybeimpspec
@@ -888,12 +941,14 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -----------------------------------------------------------------------------
 -- Top-Level Declarations
 
+-- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl RdrName) }
-        : topdecls ';' topdecl        {% addAnnotation (oll $1) AnnSemi (gl $2)
-                                         >> return ($1 `appOL` unitOL $3) }
-        | topdecls ';'                {% addAnnotation (oll $1) AnnSemi (gl $2)
-                                         >> return $1 }
-        | topdecl                     { unitOL $1 }
+        : topdecls_semi topdecl        { $1 `snocOL` $2 }
+
+-- May have trailing semicolons, can be empty
+topdecls_semi :: { OrdList (LHsDecl RdrName) }
+        : topdecls_semi topdecl semis1 {% ams $2 $3 >> return ($1 `snocOL` $2) }
+        | {- empty -}                  { nilOL }
 
 topdecl :: { LHsDecl RdrName }
         : cl_decl                               { sL1 $1 (TyClD (unLoc $1)) }
@@ -1666,8 +1721,8 @@ ctype   :: { LHsType RdrName }
                                          >> return (sLL $1 $> $
                                             HsQualTy { hst_ctxt = $1
                                                      , hst_body = $3 }) }
-        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy (unLoc $1) $3))
-                                             [mj AnnVal $1,mu AnnDcolon $2] }
+        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy $1 $3))
+                                             [mu AnnDcolon $2] }
         | type                        { $1 }
 
 ----------------------
@@ -1691,8 +1746,8 @@ ctypedoc :: { LHsType RdrName }
                                          >> return (sLL $1 $> $
                                             HsQualTy { hst_ctxt = $1
                                                      , hst_body = $3 }) }
-        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy (unLoc $1) $3))
-                                             [mj AnnVal $1,mu AnnDcolon $2] }
+        | ipvar '::' type             {% ams (sLL $1 $> (HsIParamTy $1 $3))
+                                             [mu AnnDcolon $2] }
         | typedoc                     { $1 }
 
 ----------------------
@@ -2499,8 +2554,8 @@ cvtopbody :: { ([AddAnn],[LHsDecl RdrName]) }
         |      vocurly    cvtopdecls0 close    { ([],$2) }
 
 cvtopdecls0 :: { [LHsDecl RdrName] }
-        : {- empty -}           { [] }
-        | cvtopdecls            { $1 }
+        : topdecls_semi         { cvTopDecls $1 }
+        | topdecls              { cvTopDecls $1 }
 
 -----------------------------------------------------------------------------
 -- Tuple expressions
@@ -3082,6 +3137,9 @@ varop   :: { Located RdrName }
 qop     :: { LHsExpr RdrName }   -- used in sections
         : qvarop                { sL1 $1 $ HsVar $1 }
         | qconop                { sL1 $1 $ HsVar $1 }
+        | '`' '_' '`'           {% ams (sLL $1 $> EWildPat)
+                                       [mj AnnBackquote $1,mj AnnVal $2
+                                       ,mj AnnBackquote $3] }
 
 qopm    :: { LHsExpr RdrName }   -- used in sections
         : qvaropm               { sL1 $1 $ HsVar $1 }
@@ -3555,7 +3613,19 @@ am a (b,s) = do
   addAnnotation l b (gl s)
   return av
 
--- |Add a list of AddAnns to the given AST element
+-- | Add a list of AddAnns to the given AST element.  For example,
+-- the parsing rule for @let@ looks like:
+--
+-- @
+--      | 'let' binds 'in' exp    {% ams (sLL $1 $> $ HsLet (snd $ unLoc $2) $4)
+--                                       (mj AnnLet $1:mj AnnIn $3
+--                                         :(fst $ unLoc $2)) }
+-- @
+--
+-- This adds an AnnLet annotation for @let@, an AnnIn for @in@, as well
+-- as any annotations that may arise in the binds. This will include open
+-- and closing braces if they are used to delimit the let expressions.
+--
 ams :: Located a -> [AddAnn] -> P (Located a)
 ams a@(L l _) bs = addAnnsAt l bs >> return a
 

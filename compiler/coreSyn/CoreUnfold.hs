@@ -46,7 +46,7 @@ import CoreSyn
 import PprCore          ()      -- Instances
 import OccurAnal        ( occurAnalyseExpr )
 import CoreSubst hiding( substTy )
-import CoreArity       ( manifestArity, exprBotStrictness_maybe )
+import CoreArity       ( manifestArity )
 import CoreUtils
 import Id
 import DataCon
@@ -63,7 +63,6 @@ import Outputable
 import ForeignCall
 
 import qualified Data.ByteString as BS
-import Data.Maybe
 
 {-
 ************************************************************************
@@ -74,12 +73,13 @@ import Data.Maybe
 -}
 
 mkTopUnfolding :: DynFlags -> Bool -> CoreExpr -> Unfolding
-mkTopUnfolding dflags = mkUnfolding dflags InlineRhs True {- Top level -}
+mkTopUnfolding dflags is_bottoming rhs
+  = mkUnfolding dflags InlineRhs True is_bottoming rhs
 
 mkImplicitUnfolding :: DynFlags -> CoreExpr -> Unfolding
 -- For implicit Ids, do a tiny bit of optimising first
 mkImplicitUnfolding dflags expr
-    = mkTopUnfolding dflags False (simpleOptExpr expr)
+  = mkTopUnfolding dflags False (simpleOptExpr expr)
 
 -- Note [Top-level flag on inline rules]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -88,7 +88,8 @@ mkImplicitUnfolding dflags expr
 -- Simplify.simplUnfolding.
 
 mkSimpleUnfolding :: DynFlags -> CoreExpr -> Unfolding
-mkSimpleUnfolding dflags = mkUnfolding dflags InlineRhs False False
+mkSimpleUnfolding dflags rhs
+  = mkUnfolding dflags InlineRhs False False rhs
 
 mkDFunUnfolding :: [Var] -> DataCon -> [CoreExpr] -> Unfolding
 mkDFunUnfolding bndrs con ops
@@ -120,7 +121,7 @@ mkWorkerUnfolding dflags work_fn
   = mkCoreUnfolding src top_lvl new_tmpl guidance
   where
     new_tmpl = simpleOptExpr (work_fn tmpl)
-    guidance = calcUnfoldingGuidance dflags new_tmpl
+    guidance = calcUnfoldingGuidance dflags False new_tmpl
 
 mkWorkerUnfolding _ _ _ = noUnfolding
 
@@ -142,53 +143,52 @@ mkInlineUnfolding mb_arity expr
 
 mkInlinableUnfolding :: DynFlags -> CoreExpr -> Unfolding
 mkInlinableUnfolding dflags expr
-  = mkUnfolding dflags InlineStable True is_bot expr'
+  = mkUnfolding dflags InlineStable False False expr'
   where
     expr' = simpleOptExpr expr
-    is_bot = isJust (exprBotStrictness_maybe expr')
 
-specUnfolding :: DynFlags -> Subst -> [Var] -> [CoreExpr] -> Unfolding -> Unfolding
+specUnfolding :: [Var] -> (CoreExpr -> CoreExpr) -> Arity -> Unfolding -> Unfolding
 -- See Note [Specialising unfoldings]
--- specUnfolding subst new_bndrs spec_args unf
---   = \new_bndrs. (subst( unf ) spec_args)
+-- specUnfolding spec_bndrs spec_app arity_decrease unf
+--   = \spec_bndrs. spec_app( unf )
 --
--- Precondition: in-scope(subst) `superset` fvs( spec_args )
-specUnfolding _ subst new_bndrs spec_args
-              df@(DFunUnfolding { df_bndrs = bndrs, df_con = con , df_args = args })
-  = ASSERT2( length bndrs >= length spec_args, ppr df $$ ppr spec_args $$ ppr new_bndrs )
-    mkDFunUnfolding (new_bndrs ++ extra_bndrs) con
-                    (map (substExpr spec_doc subst2) args)
+specUnfolding spec_bndrs spec_app arity_decrease
+              df@(DFunUnfolding { df_bndrs = old_bndrs, df_con = con, df_args = args })
+  = ASSERT2( arity_decrease == count isId old_bndrs - count isId spec_bndrs, ppr df )
+    mkDFunUnfolding spec_bndrs con (map spec_arg args)
+      -- There is a hard-to-check assumption here that the spec_app has
+      -- enough applications to exactly saturate the old_bndrs
+      -- For DFunUnfoldings we transform
+      --       \old_bndrs. MkD <op1> ... <opn>
+      -- to
+      --       \new_bndrs. MkD (spec_app(\old_bndrs. <op1>)) ... ditto <opn>
+      -- The ASSERT checks the value part of that
   where
-    subst1 = extendSubstList subst (bndrs `zip` spec_args)
-    (subst2, extra_bndrs) = substBndrs subst1 (dropList spec_args bndrs)
+    spec_arg arg = simpleOptExpr (spec_app (mkLams old_bndrs arg))
+                   -- The beta-redexes created by spec_app will be
+                   -- simplified away by simplOptExpr
 
-specUnfolding _dflags subst new_bndrs spec_args
+specUnfolding spec_bndrs spec_app arity_decrease
               (CoreUnfolding { uf_src = src, uf_tmpl = tmpl
                              , uf_is_top = top_lvl
                              , uf_guidance = old_guidance })
  | isStableSource src  -- See Note [Specialising unfoldings]
- , UnfWhen { ug_arity = old_arity
-           , ug_unsat_ok = unsat_ok
+ , UnfWhen { ug_arity     = old_arity
+           , ug_unsat_ok  = unsat_ok
            , ug_boring_ok = boring_ok } <- old_guidance
- = let guidance = UnfWhen { ug_arity = old_arity - count isValArg spec_args
-                                     + count isId new_bndrs
-                          , ug_unsat_ok = unsat_ok
+ = let guidance = UnfWhen { ug_arity     = old_arity - arity_decrease
+                          , ug_unsat_ok  = unsat_ok
                           , ug_boring_ok = boring_ok }
-       new_tmpl = simpleOptExpr $ mkLams new_bndrs $
-                  mkApps (substExpr spec_doc subst tmpl) spec_args
-                   -- The beta-redexes created here will be simplified
-                   -- away by simplOptExpr in mkUnfolding
+       new_tmpl = simpleOptExpr (mkLams spec_bndrs (spec_app tmpl))
+                   -- The beta-redexes created by spec_app will be
+                   -- simplified away by simplOptExpr
 
    in mkCoreUnfolding src top_lvl new_tmpl guidance
 
-specUnfolding _ _ _ _ _ = noUnfolding
+specUnfolding _ _ _ _ = noUnfolding
 
-spec_doc :: SDoc
-spec_doc = text "specUnfolding"
-
-{-
-Note [Specialising unfoldings]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Specialising unfoldings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When we specialise a function for some given type-class arguments, we use
 specUnfolding to specialise its unfolding.  Some important points:
 
@@ -231,26 +231,27 @@ mkCoreUnfolding src top_lvl expr guidance
                     uf_expandable   = exprIsExpandable expr,
                     uf_guidance     = guidance }
 
-mkUnfolding :: DynFlags -> UnfoldingSource -> Bool -> Bool -> CoreExpr
+mkUnfolding :: DynFlags -> UnfoldingSource
+            -> Bool       -- Is top-level
+            -> Bool       -- Definitely a bottoming binding
+                          -- (only relevant for top-level bindings)
+            -> CoreExpr
             -> Unfolding
 -- Calculates unfolding guidance
 -- Occurrence-analyses the expression before capturing it
-mkUnfolding dflags src top_lvl is_bottoming expr
-  | top_lvl && is_bottoming
-  , not (exprIsTrivial expr)
-  = NoUnfolding    -- See Note [Do not inline top-level bottoming functions]
-  | otherwise
+mkUnfolding dflags src is_top_lvl is_bottoming expr
   = CoreUnfolding { uf_tmpl         = occurAnalyseExpr expr,
                       -- See Note [Occurrrence analysis of unfoldings]
                     uf_src          = src,
-                    uf_is_top       = top_lvl,
+                    uf_is_top       = is_top_lvl,
                     uf_is_value     = exprIsHNF        expr,
                     uf_is_conlike   = exprIsConLike    expr,
                     uf_expandable   = exprIsExpandable expr,
                     uf_is_work_free = exprIsWorkFree   expr,
                     uf_guidance     = guidance }
   where
-    guidance = calcUnfoldingGuidance dflags expr
+    is_top_bottoming = is_top_lvl && is_bottoming
+    guidance         = calcUnfoldingGuidance dflags is_top_bottoming expr
         -- NB: *not* (calcUnfoldingGuidance (occurAnalyseExpr expr))!
         -- See Note [Calculate unfolding guidance on the non-occ-anal'd expression]
 
@@ -328,12 +329,13 @@ inlineBoringOk e
 
 calcUnfoldingGuidance
         :: DynFlags
-        -> CoreExpr    -- Expression to look at
+        -> Bool          -- Definitely a top-level, bottoming binding
+        -> CoreExpr      -- Expression to look at
         -> UnfoldingGuidance
-calcUnfoldingGuidance dflags (Tick t expr)
+calcUnfoldingGuidance dflags is_top_bottoming (Tick t expr)
   | not (tickishIsCode t)  -- non-code ticks don't matter for unfolding
-  = calcUnfoldingGuidance dflags expr
-calcUnfoldingGuidance dflags expr
+  = calcUnfoldingGuidance dflags is_top_bottoming expr
+calcUnfoldingGuidance dflags is_top_bottoming expr
   = case sizeExpr dflags bOMB_OUT_SIZE val_bndrs body of
       TooBig -> UnfNever
       SizeIs size cased_bndrs scrut_discount
@@ -341,6 +343,10 @@ calcUnfoldingGuidance dflags expr
         -> UnfWhen { ug_unsat_ok = unSaturatedOk
                    , ug_boring_ok =  boringCxtOk
                    , ug_arity = n_val_bndrs }   -- Note [INLINE for small functions]
+
+        | is_top_bottoming
+        -> UnfNever   -- See Note [Do not inline top-level bottoming functions]
+
         | otherwise
         -> UnfIfGoodArgs { ug_args  = map (mk_discount cased_bndrs) val_bndrs
                          , ug_size  = size
@@ -971,40 +977,52 @@ smallEnoughToInline _ _
   = False
 
 ----------------
-certainlyWillInline :: DynFlags -> Unfolding -> Maybe Unfolding
+
+certainlyWillInline :: DynFlags -> IdInfo -> Maybe Unfolding
 -- Sees if the unfolding is pretty certain to inline
 -- If so, return a *stable* unfolding for it, that will always inline
-certainlyWillInline dflags unf@(CoreUnfolding { uf_guidance = guidance, uf_tmpl = expr })
-  = case guidance of
-      UnfNever   -> Nothing
-      UnfWhen {} -> Just (unf { uf_src = InlineStable })
+certainlyWillInline dflags fn_info
+  = case unfoldingInfo fn_info of
+      CoreUnfolding { uf_tmpl = e, uf_guidance = g }
+        | loop_breaker -> Nothing       -- Won't inline, so try w/w
+        | otherwise    -> do_cunf e g   -- Depends on size, so look at that
 
-      -- The UnfIfGoodArgs case seems important.  If we w/w small functions
-      -- binary sizes go up by 10%!  (This is with SplitObjs.)  I'm not totally
-      -- sure whyy.
-      UnfIfGoodArgs { ug_size = size, ug_args = args }
-         | not (null args)  -- See Note [certainlyWillInline: be careful of thunks]
-         , let arity = length args
-         , size - (10 * (arity + 1)) <= ufUseThreshold dflags
-         -> Just (unf { uf_src      = InlineStable
-                      , uf_guidance = UnfWhen { ug_arity     = arity
-                                              , ug_unsat_ok  = unSaturatedOk
-                                              , ug_boring_ok = inlineBoringOk expr } })
-                -- Note the "unsaturatedOk". A function like  f = \ab. a
-                -- will certainly inline, even if partially applied (f e), so we'd
-                -- better make sure that the transformed inlining has the same property
+      DFunUnfolding {} -> Just fn_unf  -- Don't w/w DFuns; it never makes sense
+                                       -- to do so, and even if it is currently a
+                                       -- loop breaker, it may not be later
 
-      _  -> Nothing
+      _other_unf       -> Nothing
 
-certainlyWillInline _ unf@(DFunUnfolding {})
-  = Just unf
+  where
+    loop_breaker = isStrongLoopBreaker (occInfo fn_info)
+    fn_unf       = unfoldingInfo fn_info
 
-certainlyWillInline _ _
-  = Nothing
+    do_cunf :: CoreExpr -> UnfoldingGuidance -> Maybe Unfolding
+    do_cunf _ UnfNever     = Nothing
+    do_cunf _ (UnfWhen {}) = Just (fn_unf { uf_src = InlineStable })
+                             -- INLINE functions have UnfWhen
 
-{-
-Note [certainlyWillInline: be careful of thunks]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        -- The UnfIfGoodArgs case seems important.  If we w/w small functions
+        -- binary sizes go up by 10%!  (This is with SplitObjs.)
+        -- I'm not totally sure why.
+        -- INLINABLE functions come via this path
+        --    See Note [certainlyWillInline: INLINABLE]
+    do_cunf expr (UnfIfGoodArgs { ug_size = size, ug_args = args })
+      | not (null args)  -- See Note [certainlyWillInline: be careful of thunks]
+      , let arity = length args
+      , size - (10 * (arity + 1)) <= ufUseThreshold dflags
+      = Just (fn_unf { uf_src      = InlineStable
+                     , uf_guidance = UnfWhen { ug_arity     = arity
+                                             , ug_unsat_ok  = unSaturatedOk
+                                             , ug_boring_ok = inlineBoringOk expr } })
+             -- Note the "unsaturatedOk". A function like  f = \ab. a
+             -- will certainly inline, even if partially applied (f e), so we'd
+             -- better make sure that the transformed inlining has the same property
+      | otherwise
+      = Nothing
+
+{- Note [certainlyWillInline: be careful of thunks]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Don't claim that thunks will certainly inline, because that risks work
 duplication.  Even if the work duplication is not great (eg is_cheap
 holds), it can make a big difference in an inner loop In Trac #5623 we
@@ -1012,6 +1030,13 @@ found that the WorkWrap phase thought that
        y = case x of F# v -> F# (v +# v)
 was certainlyWillInline, so the addition got duplicated.
 
+Note [certainlyWillInline: INLINABLE]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+certainlyWillInline /must/ return Nothing for a large INLINABLE thing,
+even though we have a stable inlining, so that strictness w/w takes
+place.  It makes a big difference to efficiency, and the w/w pass knows
+how to transfer the INLINABLE info to the worker; see WorkWrap
+Note [Worker-wrapper for INLINABLE functions]
 
 ************************************************************************
 *                                                                      *

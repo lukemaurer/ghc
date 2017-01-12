@@ -14,6 +14,12 @@ module CoreSyn (
         TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
         deTagExpr, deTagBind,
 
+        -- * In/Out type synonyms
+        InId, InBind, InExpr, InAlt, InArg, InType, InKind,
+               InBndr, InVar, InCoercion, InTyVar, InCoVar,
+        OutId, OutBind, OutExpr, OutAlt, OutArg, OutType, OutKind,
+               OutBndr, OutVar, OutCoercion, OutTyVar, OutCoVar,
+
         -- ** 'Expr' construction
         mkLets, mkLams,
         mkApps, mkTyApps, mkCoApps, mkVarApps, mkTyArg,
@@ -42,6 +48,7 @@ module CoreSyn (
         isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
 
+        -- * Tick-related functions
         tickishCounts, tickishScoped, tickishScopesLike, tickishFloatable,
         tickishCanSplit, mkNoCount, mkNoScope,
         tickishIsCode, tickishPlace,
@@ -381,7 +388,8 @@ In this situation you should use @case@ rather than a @let@. The function
 alternatively use 'MkCore.mkCoreLet' rather than this constructor directly,
 which will generate a @case@ if necessary
 
-Th let/app invariant is initially enforced by DsUtils.mkCoreLet and mkCoreApp
+The let/app invariant is initially enforced by mkCoreLet and mkCoreApp in
+coreSyn/MkCore.
 
 Note [CoreSyn case invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -397,7 +405,7 @@ The levity-polymorphism invariants are these:
 A type (t::TYPE r) is "levity polymorphic" if 'r' has any free variables.
 
 For example
-  (\(r::RuntimeRep). \(a::TYPE r). \(x::a). e
+  \(r::RuntimeRep). \(a::TYPE r). \(x::a). e
 is illegal because x's type has kind (TYPE r), which has 'r' free.
 
 Note [CoreSyn let goal]
@@ -464,6 +472,36 @@ this exhaustive list can be empty!
 
 
 ************************************************************************
+*                                                                      *
+            In/Out type synonyms
+*                                                                      *
+********************************************************************* -}
+
+{- Many passes apply a substitution, and it's very handy to have type
+   synonyms to remind us whether or not the subsitution has been applied -}
+
+-- Pre-cloning or substitution
+type InBndr     = CoreBndr
+type InType     = Type
+type InKind     = Kind
+type InBind     = CoreBind
+type InExpr     = CoreExpr
+type InAlt      = CoreAlt
+type InArg      = CoreArg
+type InCoercion = Coercion
+
+-- Post-cloning or substitution
+type OutBndr     = CoreBndr
+type OutType     = Type
+type OutKind     = Kind
+type OutCoercion = Coercion
+type OutBind     = CoreBind
+type OutExpr     = CoreExpr
+type OutAlt      = CoreAlt
+type OutArg      = CoreArg
+
+
+{- *********************************************************************
 *                                                                      *
               Ticks
 *                                                                      *
@@ -1095,7 +1133,7 @@ data UnfoldingGuidance
                 -- Used (a) for small *and* cheap unfoldings
                 --      (b) for INLINE functions
                 -- See Note [INLINE for small functions] in CoreUnfold
-      ug_arity    :: Arity,             -- Number of value arguments expected
+      ug_arity    :: Arity,     -- Number of value arguments expected
 
       ug_unsat_ok  :: Bool,     -- True <=> ok to inline even if unsaturated
       ug_boring_ok :: Bool      -- True <=> ok to inline even if the context is boring

@@ -1204,12 +1204,13 @@ interfaces.  Notably this plays a role in tcTySigs in TcBinds.hs.
                                 ~~~~~~~~
 -}
 
--- | Make a dependent forall.
+-- | Make a dependent forall over an Inferred (as opposed to Specified)
+-- variable
 mkInvForAllTy :: TyVar -> Type -> Type
 mkInvForAllTy tv ty = ASSERT( isTyVar tv )
                       ForAllTy (TvBndr tv Inferred) ty
 
--- | Like mkForAllTys, but assumes all variables are dependent and invisible,
+-- | Like mkForAllTys, but assumes all variables are dependent and Inferred,
 -- a common case
 mkInvForAllTys :: [TyVar] -> Type -> Type
 mkInvForAllTys tvs ty = ASSERT( all isTyVar tvs )
@@ -1734,27 +1735,6 @@ predTypeEqRel ty
   = ReprEq
   | otherwise
   = NomEq
-
-{-
-%************************************************************************
-%*                                                                      *
-                   Size
-*                                                                      *
-************************************************************************
--}
-
--- NB: This function does not respect `eqType`, in that two types that
--- are `eqType` may return different sizes. This is OK, because this
--- function is used only in reporting, not decision-making.
-typeSize :: Type -> Int
-typeSize (LitTy {})                 = 1
-typeSize (TyVarTy {})               = 1
-typeSize (AppTy t1 t2)              = typeSize t1 + typeSize t2
-typeSize (FunTy t1 t2)              = typeSize t1 + typeSize t2
-typeSize (ForAllTy (TvBndr tv _) t) = typeSize (tyVarKind tv) + typeSize t
-typeSize (TyConApp _ ts)            = 1 + sum (map typeSize ts)
-typeSize (CastTy ty co)             = typeSize ty + coercionSize co
-typeSize (CoercionTy co)            = coercionSize co
 
 {-
 %************************************************************************

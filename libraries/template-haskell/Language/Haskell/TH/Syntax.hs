@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, DeriveDataTypeable,
              DeriveGeneric, FlexibleInstances, DefaultSignatures,
-             RankNTypes, RoleAnnotations, ScopedTypeVariables #-}
+             RankNTypes, RoleAnnotations, ScopedTypeVariables,
+             Trustworthy #-}
 
 {-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
 
@@ -1187,20 +1188,60 @@ unboxedTupleDataName :: Int -> Name
 -- | Unboxed tuple type constructor
 unboxedTupleTypeName :: Int -> Name
 
-unboxedTupleDataName 0 = error "unboxedTupleDataName 0"
-unboxedTupleDataName 1 = error "unboxedTupleDataName 1"
-unboxedTupleDataName n = mk_unboxed_tup_name (n-1) DataName
-
-unboxedTupleTypeName 0 = error "unboxedTupleTypeName 0"
-unboxedTupleTypeName 1 = error "unboxedTupleTypeName 1"
-unboxedTupleTypeName n = mk_unboxed_tup_name (n-1) TcClsName
+unboxedTupleDataName n = mk_unboxed_tup_name n DataName
+unboxedTupleTypeName n = mk_unboxed_tup_name n TcClsName
 
 mk_unboxed_tup_name :: Int -> NameSpace -> Name
-mk_unboxed_tup_name n_commas space
-  = Name occ (NameG space (mkPkgName "ghc-prim") tup_mod)
+mk_unboxed_tup_name n space
+  = Name (mkOccName tup_occ) (NameG space (mkPkgName "ghc-prim") tup_mod)
   where
-    occ = mkOccName ("(#" ++ replicate n_commas ',' ++ "#)")
-    tup_mod = mkModName "GHC.Tuple"
+    tup_occ | n == 1    = "Unit#" -- See Note [One-tuples] in TysWiredIn
+            | otherwise = "(#" ++ replicate n_commas ',' ++ "#)"
+    n_commas = n - 1
+    tup_mod  = mkModName "GHC.Tuple"
+
+-- Unboxed sum data and type constructors
+-- | Unboxed sum data constructor
+unboxedSumDataName :: SumAlt -> SumArity -> Name
+-- | Unboxed sum type constructor
+unboxedSumTypeName :: SumArity -> Name
+
+unboxedSumDataName alt arity
+  | alt > arity
+  = error $ prefix ++ "Index out of bounds." ++ debug_info
+
+  | alt <= 0
+  = error $ prefix ++ "Alt must be > 0." ++ debug_info
+
+  | arity < 2
+  = error $ prefix ++ "Arity must be >= 2." ++ debug_info
+
+  | otherwise
+  = Name (mkOccName sum_occ)
+         (NameG DataName (mkPkgName "ghc-prim") (mkModName "GHC.Prim"))
+
+  where
+    prefix     = "unboxedSumDataName: "
+    debug_info = " (alt: " ++ show alt ++ ", arity: " ++ show arity ++ ")"
+
+    -- Synced with the definition of mkSumDataConOcc in TysWiredIn
+    sum_occ = '(' : '#' : bars nbars_before ++ '_' : bars nbars_after ++ "#)"
+    bars i = replicate i '|'
+    nbars_before = alt - 1
+    nbars_after  = arity - alt
+
+unboxedSumTypeName arity
+  | arity < 2
+  = error $ "unboxedSumTypeName: Arity must be >= 2."
+         ++ " (arity: " ++ show arity ++ ")"
+
+  | otherwise
+  = Name (mkOccName sum_occ)
+         (NameG TcClsName (mkPkgName "ghc-prim") (mkModName "GHC.Prim"))
+
+  where
+    -- Synced with the definition of mkSumTyConOcc in TysWiredIn
+    sum_occ = '(' : '#' : replicate (arity - 1) '|' ++ "#)"
 
 -----------------------------------------------------
 --              Locations

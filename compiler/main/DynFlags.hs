@@ -1,6 +1,5 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 -------------------------------------------------------------------------------
 --
@@ -125,9 +124,7 @@ module DynFlags (
         -- * Compiler configuration suitable for display to the user
         compilerInfo,
 
-#ifdef GHCI
         rtsIsProfiled,
-#endif
         dynamicGhc,
 
 #include "GHCConstantsHaskellExports.hs"
@@ -157,16 +154,6 @@ module DynFlags (
 
 #include "HsVersions.h"
 
-#if defined mingw32_HOST_OS && !defined WINAPI
-# if defined i386_HOST_ARCH
-#  define WINAPI stdcall
-# elif defined x86_64_HOST_ARCH
-#  define WINAPI ccall
-# else
-#  error unknown architecture
-# endif
-#endif
-
 import Platform
 import PlatformConstants
 import Module
@@ -189,7 +176,9 @@ import FastString
 import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
-import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn )
+import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn
+                               , getCaretDiagnostic )
+import SysTools.Terminal ( stderrSupportsAnsiColors )
 
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.IORef
@@ -199,7 +188,7 @@ import Control.Monad.Trans.Class
 import Control.Monad.Trans.Writer
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Except
-import Control.Exception (catch, throwIO)
+import Control.Exception (throwIO)
 
 import Data.Ord
 import Data.Bits
@@ -216,14 +205,6 @@ import System.Directory
 import System.Environment (getEnv)
 import System.IO
 import System.IO.Error
-#if defined MIN_VERSION_terminfo
-import System.Console.Terminfo (SetupTermError, Terminal, getCapability,
-                                setupTermFromEnv, termColors)
-import System.Posix (queryTerminal, stdError)
-#elif defined mingw32_HOST_OS
-import System.Environment (lookupEnv)
-import qualified Graphics.Win32 as Win32
-#endif
 import Text.ParserCombinators.ReadP hiding (char)
 import Text.ParserCombinators.ReadP as R
 
@@ -446,6 +427,7 @@ data GeneralFlag
    | Opt_CrossModuleSpecialise
    | Opt_StaticArgumentTransformation
    | Opt_CSE
+   | Opt_StgCSE
    | Opt_LiberateCase
    | Opt_SpecConstr
    | Opt_DoLambdaEtaExpansion
@@ -537,8 +519,10 @@ data GeneralFlag
    -- output style opts
    | Opt_ErrorSpans -- Include full span info in error messages,
                     -- instead of just the start position.
+   | Opt_DiagnosticsShowCaret -- Show snippets of offending code
    | Opt_PprCaseAsLet
    | Opt_PprShowTicks
+   | Opt_ShowHoleConstraints
 
    -- Suppress all coercions, them replacing with '...'
    | Opt_SuppressCoercions
@@ -613,7 +597,6 @@ data WarningFlag =
    | Opt_WarnUnusedMatches
    | Opt_WarnUnusedTypePatterns
    | Opt_WarnUnusedForalls
-   | Opt_WarnContextQuantification -- remove in 8.2
    | Opt_WarnWarningsDeprecations
    | Opt_WarnDeprecatedFlags
    | Opt_WarnAMP -- Introduced in GHC 7.8, obsolete since 7.10
@@ -1498,84 +1481,6 @@ initDynFlags dflags = do
         rtccInfo      = refRtccInfo
         }
 
--- | Check if ANSI escape sequences can be used to control color in stderr.
-stderrSupportsAnsiColors :: IO Bool
-stderrSupportsAnsiColors = do
-#if defined MIN_VERSION_terminfo
-  queryTerminal stdError `andM` do
-    (termSupportsColors <$> setupTermFromEnv)
-      `catch` \ (_ :: SetupTermError) ->
-        pure False
-
-  where
-
-    andM :: Monad m => m Bool -> m Bool -> m Bool
-    andM mx my = do
-      x <- mx
-      if x
-        then my
-        else pure x
-
-    termSupportsColors :: Terminal -> Bool
-    termSupportsColors term = fromMaybe 0 (getCapability term termColors) > 0
-
-#elif defined mingw32_HOST_OS
-  foldl1 orM
-    [ (/= "") <$> getEnvLM "ANSICON"
-    , (== "on") <$> getEnvLM "ConEmuANSI"
-    , (== "xterm") <$> getEnvLM "TERM"
-    , do
-        h <- Win32.getStdHandle Win32.sTD_ERROR_HANDLE
-        mode <- getConsoleMode h
-        if modeHasVTP mode
-          then pure True
-          else do
-            setConsoleMode h (modeAddVTP mode)
-            modeHasVTP <$> getConsoleMode h
-      `catch` \ (_ :: IOError) ->
-        pure False
-    ]
-
-  where
-
-    orM :: Monad m => m Bool -> m Bool -> m Bool
-    orM mx my = do
-      x <- mx
-      if x
-        then pure x
-        else my
-
-    getEnvLM :: String -> IO String
-    getEnvLM name = map toLower . fromMaybe "" <$> lookupEnv name
-
-    modeHasVTP :: Win32.DWORD -> Bool
-    modeHasVTP mode = mode .&. eNABLE_VIRTUAL_TERMINAL_PROCESSING /= 0
-
-    modeAddVTP :: Win32.DWORD -> Win32.DWORD
-    modeAddVTP mode = mode .|. eNABLE_VIRTUAL_TERMINAL_PROCESSING
-
-eNABLE_VIRTUAL_TERMINAL_PROCESSING :: Win32.DWORD
-eNABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-
-getConsoleMode :: Win32.HANDLE -> IO Win32.DWORD
-getConsoleMode h = with 64 $ \ mode -> do
-  Win32.failIfFalse_ "GetConsoleMode" (c_GetConsoleMode h mode)
-  peek mode
-
-setConsoleMode :: Win32.HANDLE -> Win32.DWORD -> IO ()
-setConsoleMode h mode = do
-  Win32.failIfFalse_ "SetConsoleMode" (c_SetConsoleMode h mode)
-
-foreign import WINAPI unsafe "windows.h GetConsoleMode" c_GetConsoleMode
-  :: Win32.HANDLE -> Ptr Win32.DWORD -> IO Win32.BOOL
-
-foreign import WINAPI unsafe "windows.h SetConsoleMode" c_SetConsoleMode
-  :: Win32.HANDLE -> Win32.DWORD -> IO Win32.BOOL
-
-#else
-   pure False
-#endif
-
 -- | The normal 'DynFlags'. Note that they are not suitable for use in this form
 -- and must be fully initialized by 'GHC.runGhc' first.
 defaultDynFlags :: Settings -> DynFlags
@@ -1792,18 +1697,24 @@ defaultFatalMessager = hPutStrLn stderr
 defaultLogAction :: LogAction
 defaultLogAction dflags reason severity srcSpan style msg
     = case severity of
-      SevOutput      -> printSDoc msg style
-      SevDump        -> printSDoc (msg $$ blankLine) style
+      SevOutput      -> printOut msg style
+      SevDump        -> printOut (msg $$ blankLine) style
       SevInteractive -> putStrSDoc msg style
       SevInfo        -> printErrs msg style
       SevFatal       -> printErrs msg style
-      _              -> do hPutChar stderr '\n'
-                           printErrs message (setStyleColoured True style)
+      _              -> do -- otherwise (i.e. SevError or SevWarning)
+                           hPutChar stderr '\n'
+                           caretDiagnostic <-
+                               if gopt Opt_DiagnosticsShowCaret dflags
+                               then getCaretDiagnostic severity srcSpan
+                               else pure empty
+                           printErrs (message $+$ caretDiagnostic)
+                               (setStyleColoured True style)
                            -- careful (#2302): printErrs prints in UTF-8,
                            -- whereas converting to string first and using
                            -- hPutStr would just emit the low 8 bits of
                            -- each unicode char.
-    where printSDoc  = defaultLogActionHPrintDoc  dflags stdout
+    where printOut   = defaultLogActionHPrintDoc  dflags stdout
           printErrs  = defaultLogActionHPrintDoc  dflags stderr
           putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
           -- Pretty print the warning flag, if any (#10752)
@@ -1820,17 +1731,16 @@ defaultLogAction dflags reason severity srcSpan style msg
                         groups -> " (in " ++ intercalate ", " (map ("-W"++) groups) ++ ")"
               | otherwise = ""
 
+-- | Like 'defaultLogActionHPutStrDoc' but appends an extra newline.
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPrintDoc dflags h d sty
  = defaultLogActionHPutStrDoc dflags h (d $$ text "") sty
-      -- Adds a newline
 
 defaultLogActionHPutStrDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPutStrDoc dflags h d sty
-  = Pretty.printDoc_ Pretty.PageMode (pprCols dflags) h doc
-  where   -- Don't add a newline at the end, so that successive
-          -- calls to this log-action can output all on the same line
-    doc = runSDoc d (initSDocContext dflags sty)
+  -- Don't add a newline at the end, so that successive
+  -- calls to this log-action can output all on the same line
+  = printSDoc Pretty.PageMode dflags h sty d
 
 newtype FlushOut = FlushOut (IO ())
 
@@ -3465,8 +3375,6 @@ wWarningFlagsDeps = [
   flagSpec "dodgy-foreign-imports"       Opt_WarnDodgyForeignImports,
   flagSpec "dodgy-imports"               Opt_WarnDodgyImports,
   flagSpec "empty-enumerations"          Opt_WarnEmptyEnumerations,
-  depFlagSpec "context-quantification"   Opt_WarnContextQuantification
-    "it is subsumed by an error message that cannot be disabled",
   depFlagSpec "duplicate-constraints"    Opt_WarnDuplicateConstraints
     "it is subsumed by -Wredundant-constraints",
   flagSpec "redundant-constraints"       Opt_WarnRedundantConstraints,
@@ -3573,10 +3481,12 @@ fFlagsDeps = [
   flagSpec "cmm-elim-common-blocks"           Opt_CmmElimCommonBlocks,
   flagSpec "cmm-sink"                         Opt_CmmSink,
   flagSpec "cse"                              Opt_CSE,
+  flagSpec "stg-cse"                          Opt_StgCSE,
   flagSpec "cpr-anal"                         Opt_CprAnal,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
   flagSpec "defer-out-of-scope-variables"     Opt_DeferOutOfScopeVariables,
+  flagSpec "diagnostics-show-caret"           Opt_DiagnosticsShowCaret,
   flagSpec "dicts-cheap"                      Opt_DictsCheap,
   flagSpec "dicts-strict"                     Opt_DictsStrict,
   flagSpec "dmd-tx-dict-sel"                  Opt_DmdTxDictSel,
@@ -3654,7 +3564,8 @@ fFlagsDeps = [
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
-  flagSpec "hide-source-paths"                Opt_HideSourcePaths
+  flagSpec "hide-source-paths"                Opt_HideSourcePaths,
+  flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
@@ -3710,12 +3621,6 @@ supportedExtensions :: [String]
 supportedExtensions = concatMap toFlagSpecNamePair xFlags
   where
     toFlagSpecNamePair flg
-#ifndef GHCI
-      -- make sure that `ghc --supported-extensions` omits
-      -- "TemplateHaskell" when it's known to be unsupported. See also
-      -- GHC #11102 for rationale
-      | flagSpecFlag flg == LangExt.TemplateHaskell  = [noName]
-#endif
       | otherwise = [name, noName]
       where
         noName = "No" ++ name
@@ -3885,6 +3790,7 @@ defaultFlags :: Settings -> [GeneralFlag]
 defaultFlags settings
 -- See Note [Updating flag description in the User's Guide]
   = [ Opt_AutoLinkPackages,
+      Opt_DiagnosticsShowCaret,
       Opt_EmbedManifest,
       Opt_FlatCache,
       Opt_GenManifest,
@@ -4025,6 +3931,7 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([1,2],   Opt_CmmElimCommonBlocks)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
+    , ([1,2],   Opt_StgCSE)
     , ([1,2],   Opt_EnableRewriteRules)  -- Off for -O0; see Note [Scoping for Builtin rules]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)
@@ -4252,7 +4159,6 @@ foreign import ccall unsafe "rts_isProfiled" rtsIsProfiledIO :: IO CInt
 rtsIsProfiled :: Bool
 rtsIsProfiled = unsafeDupablePerformIO rtsIsProfiledIO /= 0
 
-#ifdef GHCI
 -- Consult the RTS to find whether GHC itself has been built with
 -- dynamic linking.  This can't be statically known at compile-time,
 -- because we build both the static and dynamic versions together with
@@ -4261,10 +4167,6 @@ foreign import ccall unsafe "rts_isDynamic" rtsIsDynamicIO :: IO CInt
 
 dynamicGhc :: Bool
 dynamicGhc = unsafeDupablePerformIO rtsIsDynamicIO /= 0
-#else
-dynamicGhc :: Bool
-dynamicGhc = False
-#endif
 
 setWarnSafe :: Bool -> DynP ()
 setWarnSafe True  = getCurLoc >>= \l -> upd (\d -> d { warnSafeOnLoc = l })
@@ -4297,24 +4199,8 @@ setIncoherentInsts True = do
   upd (\d -> d { incoherentOnLoc = l })
 
 checkTemplateHaskellOk :: TurnOnFlag -> DynP ()
-#ifdef GHCI
 checkTemplateHaskellOk _turn_on
   = getCurLoc >>= \l -> upd (\d -> d { thOnLoc = l })
-#else
--- In stage 1, Template Haskell is simply illegal, except with -M
--- We don't bleat with -M because there's no problem with TH there,
--- and in fact GHC's build system does ghc -M of the DPH libraries
--- with a stage1 compiler
-checkTemplateHaskellOk turn_on
-  | turn_on = do dfs <- liftEwM getCmdLineState
-                 case ghcMode dfs of
-                    MkDepend -> return ()
-                    _        -> addErr msg
-  | otherwise = return ()
-  where
-    msg = "Template Haskell requires GHC with interpreter support\n    " ++
-          "Perhaps you are using a stage-1 compiler?"
-#endif
 
 {- **********************************************************************
 %*                                                                      *

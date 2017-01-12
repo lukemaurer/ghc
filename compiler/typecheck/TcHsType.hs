@@ -446,6 +446,14 @@ tc_infer_hs_type mode (HsKindSig ty sig)
   = do { sig' <- tc_lhs_kind (kindLevel mode) sig
        ; ty' <- tc_lhs_type mode ty sig'
        ; return (ty', sig') }
+-- HsSpliced is an annotation produced by 'RnSplice.rnSpliceType' to communicate
+-- the splice location to the typechecker. Here we skip over it in order to have
+-- the same kind inferred for a given expression whether it was produced from
+-- splices or not.
+--
+-- See Note [Delaying modFinalizers in untyped splices].
+tc_infer_hs_type mode (HsSpliceTy (HsSpliced _ (HsSplicedTy ty)) _)
+  = tc_infer_hs_type mode ty
 tc_infer_hs_type mode (HsDocTy ty _) = tc_infer_lhs_type mode ty
 tc_infer_hs_type _    (HsCoreTy ty)  = return (ty, typeKind ty)
 tc_infer_hs_type mode other_ty
@@ -624,7 +632,7 @@ tc_hs_type mode (HsExplicitTupleTy _ tys) exp_kind
     arity = length tys
 
 --------- Constraint types
-tc_hs_type mode (HsIParamTy n ty) exp_kind
+tc_hs_type mode (HsIParamTy (L _ n) ty) exp_kind
   = do { MASSERT( isTypeLevel (mode_level mode) )
        ; ty' <- tc_lhs_type mode ty liftedTypeKind
        ; let n' = mkStrLitTy $ hsIPNameFS n

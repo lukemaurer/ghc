@@ -46,8 +46,8 @@ test('divbyzero',
       # do not generate an exception (interrupt) for integer
       # division by zero but the result is undefined.
       # C programs compiled with gcc exit normally, so do we.
-      when(platform('powerpc64-unknown-linux'), exit_code(0)),
-      when(platform('powerpc64le-unknown-linux'), exit_code(0)),
+      when(platform('powerpc64-unknown-linux'), [ignore_stdout, exit_code(0)]),
+      when(platform('powerpc64le-unknown-linux'), [ignore_stdout, exit_code(0)]),
       when(opsys('mingw32'), exit_code(1)),
       # The output under OS X is too unstable to readily compare
       when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(136)]),
@@ -247,10 +247,10 @@ test('linker_unload',
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
 
-test('T8209', [ only_ways(threaded_ways), ignore_stdout ],
+test('T8209', [ req_smp, only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
-test('T8242', [ only_ways(threaded_ways), ignore_stdout ],
+test('T8242', [ req_smp, only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
 test('T8124', [ only_ways(threaded_ways), omit_ways(['ghci']),
@@ -363,7 +363,7 @@ test('T9405', [extra_clean(['T9405.ticky']), when(msys(), expect_broken(12714))]
 test('T11788', when(ghc_dynamic(), skip),
               run_command, ['$MAKE -s --no-print-directory T11788'])
 
-test('T10296a', [extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
+test('T10296a', [ req_smp, extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
                 run_command,
                 ['$MAKE -s --no-print-directory T10296a'])
 

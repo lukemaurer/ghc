@@ -31,9 +31,7 @@ module GhcMake(
 
 #include "HsVersions.h"
 
-#ifdef GHCI
 import qualified Linker         ( unload )
-#endif
 
 import DriverPhases
 import DriverPipeline
@@ -479,7 +477,7 @@ guessOutputFile = modifySession $ \env ->
 
         name_exe = do
 #if defined(mingw32_HOST_OS)
-          -- we must add the .exe extention unconditionally here, otherwise
+          -- we must add the .exe extension unconditionally here, otherwise
           -- when name has an extension of its own, the .exe extension will
           -- not be added by DriverPipeline.exeFileName.  See #2248
           name' <- fmap (<.> "exe") name
@@ -563,13 +561,7 @@ findPartiallyCompletedCycles modsDone theGraph
 unload :: HscEnv -> [Linkable] -> IO ()
 unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
   = case ghcLink (hsc_dflags hsc_env) of
-#ifdef GHCI
         LinkInMemory -> Linker.unload hsc_env stable_linkables
-#else
-        LinkInMemory -> panic "unload: no interpreter"
-                                -- urgh.  avoid warnings:
-                                hsc_env stable_linkables
-#endif
         _other -> return ()
 
 -- -----------------------------------------------------------------------------

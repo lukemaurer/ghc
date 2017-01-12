@@ -48,10 +48,8 @@ import Data.Data hiding (Fixity(..))
 import qualified Data.Data as Data (Fixity(..))
 import Data.Maybe (isNothing)
 
-#ifdef GHCI
 import GHCi.RemoteTypes ( ForeignRef )
 import qualified Language.Haskell.TH as TH (Q)
-#endif
 
 {-
 ************************************************************************
@@ -825,6 +823,7 @@ ppr_expr (OpApp e1 op _ e2)
   = case unLoc op of
       HsVar (L _ v) -> pp_infixly v
       HsRecFld f    -> pp_infixly f
+      HsUnboundVar h@TrueExprHole{} -> pp_infixly (unboundVarOcc h)
       _             -> pp_prefixly
   where
     pp_e1 = pprDebugParendExpr e1   -- In debug mode, add parens
@@ -2047,24 +2046,13 @@ isTypedSplice _                  = False   -- Quasi-quotes are untyped splices
 -- See Note [Delaying modFinalizers in untyped splices] in RnSplice. For how
 -- this is used.
 --
-#ifdef GHCI
 newtype ThModFinalizers = ThModFinalizers [ForeignRef (TH.Q ())]
-#else
-data ThModFinalizers = ThModFinalizers
-#endif
 
 -- A Data instance which ignores the argument of 'ThModFinalizers'.
-#ifdef GHCI
 instance Data ThModFinalizers where
   gunfold _ z _ = z $ ThModFinalizers []
   toConstr  a   = mkConstr (dataTypeOf a) "ThModFinalizers" [] Data.Prefix
   dataTypeOf a  = mkDataType "HsExpr.ThModFinalizers" [toConstr a]
-#else
-instance Data ThModFinalizers where
-  gunfold _ z _ = z ThModFinalizers
-  toConstr  a   = mkConstr (dataTypeOf a) "ThModFinalizers" [] Data.Prefix
-  dataTypeOf a  = mkDataType "HsExpr.ThModFinalizers" [toConstr a]
-#endif
 
 -- | Haskell Spliced Thing
 --
@@ -2351,6 +2339,15 @@ isMonadCompExpr (ParStmtCtxt ctxt)   = isMonadCompExpr ctxt
 isMonadCompExpr (TransStmtCtxt ctxt) = isMonadCompExpr ctxt
 isMonadCompExpr _                    = False
 
+-- | Should pattern match failure in a 'HsStmtContext' be desugared using
+-- 'MonadFail'?
+isMonadFailStmtContext :: HsStmtContext id -> Bool
+isMonadFailStmtContext MonadComp    = True
+isMonadFailStmtContext DoExpr       = True
+isMonadFailStmtContext MDoExpr      = True
+isMonadFailStmtContext GhciStmtCtxt = True
+isMonadFailStmtContext _            = False
+
 matchSeparator :: HsMatchContext id -> SDoc
 matchSeparator (FunRhs {})  = text "="
 matchSeparator CaseAlt      = text "->"
@@ -2427,6 +2424,9 @@ pprStmtContext (TransStmtCtxt c)
  | opt_PprStyle_Debug = sep [text "transformed branch of", pprAStmtContext c]
  | otherwise          = pprStmtContext c
 
+instance (Outputable id, Outputable (NameOrRdrName id))
+      => Outputable (HsStmtContext id) where
+    ppr = pprStmtContext
 
 -- Used to generate the string for a *runtime* error message
 matchContextErrString :: Outputable id

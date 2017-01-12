@@ -28,12 +28,15 @@ module Id (
         -- * The main types
         Var, Id, isId,
 
+        -- * In and Out variants
+        InVar,  InId,
+        OutVar, OutId,
+
         -- ** Simple construction
         mkGlobalId, mkVanillaGlobal, mkVanillaGlobalWithInfo,
         mkLocalId, mkLocalCoVar, mkLocalIdOrCoVar,
         mkLocalIdOrCoVarWithInfo,
         mkLocalIdWithInfo, mkExportedLocalId, mkExportedVanillaId,
-        mkNonExportedLocalId,
         mkSysLocal, mkSysLocalM, mkSysLocalOrCoVar, mkSysLocalOrCoVarM,
         mkUserLocal, mkUserLocalOrCoVar,
         mkTemplateLocals, mkTemplateLocalsNum, mkTemplateLocal,
@@ -119,6 +122,8 @@ import BasicTypes
 
 -- Imported and re-exported
 import Var( Id, CoVar, DictId, JoinId,
+            InId,  InVar,
+            OutId, OutVar,
             idInfo, idDetails, setIdDetails, globaliseId, varType,
             isId, isLocalId, isGlobalId, isExportedId )
 import qualified Var
@@ -292,12 +297,6 @@ mkLocalIdWithInfo name ty info = Var.mkLocalVar VanillaId name ty info
 mkExportedLocalId :: IdDetails -> Name -> Type -> Id
 mkExportedLocalId details name ty = Var.mkExportedLocalVar details name ty vanillaIdInfo
         -- Note [Free type variables]
-
--- | Create a local 'Id' that is marked as not-exported.
--- These may be removed as dead code.
-mkNonExportedLocalId :: IdDetails -> Name -> Type -> Id
-mkNonExportedLocalId details name ty =
-  Var.mkLocalVar details name ty vanillaIdInfo
 
 mkExportedVanillaId :: Name -> Type -> Id
 mkExportedVanillaId name ty = Var.mkExportedLocalVar VanillaId name ty vanillaIdInfo

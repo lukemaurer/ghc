@@ -1443,6 +1443,10 @@ not the Prelude versions:
    functions must match the Prelude types very closely. Details are in
    flux; if you want to use this, ask!
 
+-  List notation, such as ``[x,y]`` or ``[m..n]`` can also be treated
+   via rebindable syntax if you use `-XOverloadedLists`;
+   see :ref:`overloaded-lists`.
+
 :ghc-flag:`-XRebindableSyntax` implies :ghc-flag:`-XNoImplicitPrelude`.
 
 In all cases (apart from arrow notation), the static semantics should be
@@ -3868,7 +3872,7 @@ generates ::
 
       instance Num Dollars
 
-One can think of this instance being implementated with the same code as the
+One can think of this instance being implemented with the same code as the
 ``Num Int`` instance, but with ``Dollars`` and ``getDollars`` added wherever
 necessary in order to make it typecheck. (In practice, GHC uses a somewhat
 different approach to code generation. See the :ref:`precise-gnd-specification`
@@ -9343,10 +9347,8 @@ example: ::
 
     newtype Swizzle' = MkSwizzle' (Ord a => [a] -> [a])
 
-As of GHC 7.10, this is deprecated. The
-:ghc-flag:`-Wcontext-quantification` flag detects this situation and issues
-a warning. In GHC 8.0 this flag was deprecated and declarations such as
-``MkSwizzle'`` will cause an out-of-scope error.
+Since GHC 8.0 declarations such as ``MkSwizzle'`` will cause an out-of-scope
+error.
 
 As for type signatures, implicit quantification happens for
 non-overloaded types too. So if you write this: ::
@@ -9695,6 +9697,33 @@ Here are some more details:
    be deferred, and instead bring compilation to a halt. (In
    implementation terms, they are reported by the renamer rather than
    the type checker.)
+
+There's a flag for controlling the amount of context information shown for
+typed holes:
+
+.. ghc-flag:: -fshow-hole-constraints
+
+    When reporting typed holes, also print constraints that are in scope.
+    Example: ::
+
+        f :: Eq a => a -> Bool
+        f x = _
+
+    results in the following message:
+
+    .. code-block:: none
+
+        show_constraints.hs:4:7: error:
+            • Found hole: _ :: Bool
+            • In the expression: _
+              In an equation for ‘f’: f x = _
+            • Relevant bindings include
+                x :: a (bound at show_constraints.hs:4:3)
+                f :: a -> Bool (bound at show_constraints.hs:4:1)
+              Constraints include
+                Eq a (from the type signature for:
+                             f :: Eq a => a -> Bool
+                      at show_constraints.hs:3:1-22)
 
 
 .. _partial-type-signatures:

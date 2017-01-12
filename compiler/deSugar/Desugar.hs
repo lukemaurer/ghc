@@ -304,10 +304,7 @@ deSugar hsc_env
                      (text "Desugar"<+>brackets (ppr mod))
                      (const ()) $
      do { -- Desugar the program
-        ; let export_set =
-                -- Used to be 'availsToNameSet', but we now export selectors
-                -- only when necessary. See #12125.
-                availsToNameSetWithSelectors exports
+        ; let export_set = availsToNameSet exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -369,6 +366,8 @@ deSugar hsc_env
         ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files merged
         -- id_mod /= mod when we are processing an hsig, but hsigs
         -- never desugared and compiled (there's no code!)
+        -- Consequently, this should hold for any ModGuts that make
+        -- past desugaring. See Note [Identity versus semantic module].
         ; MASSERT( id_mod == mod )
 
         ; let mod_guts = ModGuts {

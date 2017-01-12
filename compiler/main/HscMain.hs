@@ -59,7 +59,6 @@ module HscMain
     , hscParseIdentifier
     , hscTcRcLookupName
     , hscTcRnGetInfo
-#ifdef GHCI
     , hscIsGHCiMonad
     , hscGetModuleInterface
     , hscRnImportDecls
@@ -71,7 +70,6 @@ module HscMain
     , hscCompileCoreExpr
     -- * Low-level exports for hooks
     , hscCompileCoreExpr'
-#endif
       -- We want to make sure that we export enough to be able to redefine
       -- hscFileFrontEnd in client code
     , hscParse', hscSimplify', hscDesugar', tcRnModule'
@@ -83,7 +81,6 @@ module HscMain
     , showModuleIndex
     ) where
 
-#ifdef GHCI
 import Id
 import GHCi.RemoteTypes ( ForeignHValue )
 import ByteCodeGen      ( byteCodeGen, coreExprToBCOs )
@@ -96,7 +93,6 @@ import VarEnv           ( emptyTidyEnv )
 import Panic
 import ConLike
 import Control.Concurrent
-#endif
 
 import Module
 import Packages
@@ -141,6 +137,7 @@ import Maybes
 
 import DynFlags
 import ErrUtils
+import Platform ( platformOS, osSubsectionsViaSymbols )
 
 import Outputable
 import NameEnv
@@ -178,9 +175,7 @@ newHscEnv dflags = do
     us      <- mkSplitUniqSupply 'r'
     nc_var  <- newIORef (initNameCache us knownKeyNames)
     fc_var  <- newIORef emptyInstalledModuleEnv
-#ifdef GHCI
     iserv_mvar <- newMVar Nothing
-#endif
     return HscEnv {  hsc_dflags       = dflags
                   ,  hsc_targets      = []
                   ,  hsc_mod_graph    = []
@@ -190,9 +185,7 @@ newHscEnv dflags = do
                   ,  hsc_NC           = nc_var
                   ,  hsc_FC           = fc_var
                   ,  hsc_type_env_var = Nothing
-#ifdef GHCI
                   , hsc_iserv        = iserv_mvar
-#endif
                   }
 
 -- -----------------------------------------------------------------------------
@@ -262,13 +255,11 @@ ioMsgMaybe' ioA = do
 -- -----------------------------------------------------------------------------
 -- | Lookup things in the compiler's environment
 
-#ifdef GHCI
 hscTcRnLookupRdrName :: HscEnv -> Located RdrName -> IO [Name]
 hscTcRnLookupRdrName hsc_env0 rdr_name
   = runInteractiveHsc hsc_env0 $
     do { hsc_env <- getHscEnv
        ; ioMsgMaybe $ tcRnLookupRdrName hsc_env rdr_name }
-#endif
 
 hscTcRcLookupName :: HscEnv -> Name -> IO (Maybe TyThing)
 hscTcRcLookupName hsc_env0 name = runInteractiveHsc hsc_env0 $ do
@@ -284,7 +275,6 @@ hscTcRnGetInfo hsc_env0 name
     do { hsc_env <- getHscEnv
        ; ioMsgMaybe' $ tcRnGetInfo hsc_env name }
 
-#ifdef GHCI
 hscIsGHCiMonad :: HscEnv -> String -> IO Name
 hscIsGHCiMonad hsc_env name
   = runHsc hsc_env $ ioMsgMaybe $ isGHCiMonad hsc_env name
@@ -300,7 +290,6 @@ hscRnImportDecls :: HscEnv -> [LImportDecl RdrName] -> IO GlobalRdrEnv
 hscRnImportDecls hsc_env0 import_decls = runInteractiveHsc hsc_env0 $ do
   hsc_env <- getHscEnv
   ioMsgMaybe $ tcRnImportDecls hsc_env import_decls
-#endif
 
 -- -----------------------------------------------------------------------------
 -- | parse a file, returning the abstract syntax
@@ -425,7 +414,7 @@ hscTypecheck keep_rn mod_summary mb_rdr_module = do
             if hsc_src == HsigFile
                 then do (iface, _, _) <- liftIO $ hscSimpleIface hsc_env tc_result0 Nothing
                         ioMsgMaybe $
-                            tcRnMergeSignatures hsc_env (tcg_top_loc tc_result0) iface
+                            tcRnMergeSignatures hsc_env (tcg_top_loc tc_result0) hpm iface
                 else return tc_result0
 
 -- wrapper around tcRnModule to handle safe haskell extras
@@ -1073,7 +1062,6 @@ hscCheckSafe' dflags m l = do
         let pkgIfaceT = eps_PIT hsc_eps
             homePkgT  = hsc_HPT hsc_env
             iface     = lookupIfaceByModule dflags homePkgT pkgIfaceT m
-#ifdef GHCI
         -- the 'lookupIfaceByModule' method will always fail when calling from GHCi
         -- as the compiler hasn't filled in the various module tables
         -- so we need to call 'getModuleInterface' to load from disk
@@ -1081,9 +1069,6 @@ hscCheckSafe' dflags m l = do
             Just _  -> return iface
             Nothing -> snd `fmap` (liftIO $ getModuleInterface hsc_env m)
         return iface'
-#else
-        return iface
-#endif
 
 
     isHomePkg :: Module -> Bool
@@ -1320,7 +1305,6 @@ hscInteractive :: HscEnv
                -> CgGuts
                -> ModSummary
                -> IO (Maybe FilePath, CompiledByteCode)
-#ifdef GHCI
 hscInteractive hsc_env cgguts mod_summary = do
     let dflags = hsc_dflags hsc_env
     let CgGuts{ -- This is the last use of the ModGuts in a compilation.
@@ -1347,9 +1331,6 @@ hscInteractive hsc_env cgguts mod_summary = do
     (_istub_h_exists, istub_c_exists)
         <- outputForeignStubs dflags this_mod location foreign_stubs
     return (istub_c_exists, comp_bc)
-#else
-hscInteractive _ _ = panic "GHC not compiled with interpreter"
-#endif
 
 ------------------------------
 
@@ -1363,10 +1344,13 @@ hscCompileCmmFile hsc_env filename output_filename = runHsc hsc_env $ do
         dumpIfSet_dyn dflags Opt_D_dump_cmm_verbose "Parsed Cmm" (ppr cmm)
         (_, cmmgroup) <- cmmPipeline hsc_env initTopSRT cmm
         rawCmms <- cmmToRawCmm dflags (Stream.yield cmmgroup)
-        _ <- codeOutput dflags no_mod output_filename no_loc NoStubs [] rawCmms
+        let -- Make up a module name to give the NCG. We can't pass bottom here
+            -- lest we reproduce #11784.
+            mod_name = mkModuleName $ "Cmm$" ++ FilePath.takeFileName filename
+            cmm_mod = mkModule (thisPackage dflags) mod_name
+        _ <- codeOutput dflags cmm_mod output_filename no_loc NoStubs [] rawCmms
         return ()
   where
-    no_mod = panic "hscCompileCmmFile: no_mod"
     no_loc = ModLocation{ ml_hs_file  = Just filename,
                           ml_hi_file  = panic "hscCompileCmmFile: no hi file",
                           ml_obj_file = panic "hscCompileCmmFile: no obj file" }
@@ -1409,7 +1393,8 @@ doCodeGen hsc_env this_mod data_tycons
     -- we generate one SRT for the whole module.
     let
      pipeline_stream
-      | gopt Opt_SplitObjs dflags || gopt Opt_SplitSections dflags
+      | gopt Opt_SplitObjs dflags || gopt Opt_SplitSections dflags ||
+        osSubsectionsViaSymbols (platformOS (targetPlatform dflags))
         = {-# SCC "cmmPipeline" #-}
           let run_pipeline us cmmgroup = do
                 let (topSRT', us') = initUs us emptySRT
@@ -1469,7 +1454,6 @@ A naked expression returns a singleton Name [it]. The stmt is lifted into the
 IO monad as explained in Note [Interactively-bound Ids in GHCi] in HscTypes
 -}
 
-#ifdef GHCI
 -- | Compile a stmt all the way to an HValue, but don't run it
 --
 -- We return Nothing to indicate an empty statement (or comment only), not a
@@ -1673,7 +1657,6 @@ hscParseStmtWithLocation source linenumber stmt =
 
 hscParseType :: String -> Hsc (LHsType RdrName)
 hscParseType = hscParseThing parseType
-#endif
 
 hscParseIdentifier :: HscEnv -> String -> IO (Located RdrName)
 hscParseIdentifier hsc_env str =
@@ -1710,7 +1693,6 @@ hscParseThingWithLocation source linenumber parser str
 %*                                                                      *
 %********************************************************************* -}
 
-#ifdef GHCI
 hscCompileCoreExpr :: HscEnv -> SrcSpan -> CoreExpr -> IO ForeignHValue
 hscCompileCoreExpr hsc_env =
   lookupHook hscCompileCoreExprHook hscCompileCoreExpr' (hsc_dflags hsc_env) hsc_env
@@ -1739,7 +1721,6 @@ hscCompileCoreExpr' hsc_env srcspan ds_expr
          ; hval <- linkExpr hsc_env srcspan bcos
 
          ; return hval }
-#endif
 
 
 {- **********************************************************************

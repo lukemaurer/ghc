@@ -37,6 +37,10 @@ module Var (
         Var, CoVar, Id, NcId, DictId, DFunId, EvVar, EqVar, EvId, IpId, JoinId,
         TyVar, TypeVar, KindVar, TKVar, TyCoVar,
 
+        -- * In and Out variants
+        InVar,  InCoVar,  InId,  InTyVar,
+        OutVar, OutCoVar, OutId, OutTyVar,
+
         -- ** Taking 'Var's apart
         varName, varUnique, varType,
 
@@ -150,6 +154,21 @@ type JoinId = Id        -- A join variable
 -- | Type or Coercion Variable
 type TyCoVar = Id       -- Type, *or* coercion variable
                         --   predicate: isTyCoVar
+
+
+{- Many passes apply a substitution, and it's very handy to have type
+   synonyms to remind us whether or not the subsitution has been applied -}
+
+type InVar      = Var
+type InTyVar    = TyVar
+type InCoVar    = CoVar
+type InId       = Id
+type OutVar     = Var
+type OutTyVar   = TyVar
+type OutCoVar   = CoVar
+type OutId      = Id
+
+
 
 {- Note [Evidence: EvIds and CoVars]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
