@@ -657,7 +657,7 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = lintCoreApp var []
+  = lintCoreApp var [] 0
 
 lintCoreExpr (Lit lit)
   = return (literalType lit)
@@ -720,7 +720,7 @@ lintCoreExpr (Let (Rec pairs) body)
     (_, dups) = removeDups compare bndrs
 
 lintCoreExpr e@(App _ _)
-    = do { fun_ty <- case fun of Var f -> lintCoreApp f args
+    = do { fun_ty <- case fun of Var f -> lintCoreApp f args 0
                                  _     -> markAllJoinsBad $ lintCoreExpr fun
          ; addLoc (AnExpr e) $ lintCoreArgs fun_ty args }
   where
@@ -789,10 +789,13 @@ lintCoreExpr (Coercion co)
   = do { (k1, k2, ty1, ty2, role) <- lintInCo co
        ; return (mkHeteroCoercionType role k1 k2 ty1 ty2) }
 
-lintCoreApp :: Var -> [CoreExpr] -> LintM Type -- returns type of the *function*
+lintCoreApp :: Var -> [CoreExpr]
+            -> Int -- Assume this many extra arguments
+                   -- See Note [Rules for join points]
+            -> LintM Type -- returns type of the *function*
 -- Checks that this function can be applied to this many arguments, *not* the
 -- arguments themselves
-lintCoreApp var args
+lintCoreApp var args n_extra_args
   = do  { checkL (isNonCoVarId var)
                  (text "Non term variable" <+> ppr var)
 
@@ -827,9 +830,8 @@ lintCoreApp var args
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
-                  ; n_ambient_args <- getAmbientArgs
-                  ; checkL (length args + n_ambient_args == join_arity) $
-                      mkBadJoinCallMsg var' join_arity (length args) }
+                  ; checkL (args `lengthIs` (join_arity - n_extra_args)) $
+                      mkBadJumpMsg var' join_arity (length args) n_extra_args }
             Nothing ->
               do  { checkL (not (isJoinId var)) $
                       mkJoinBndrOccMismatchMsg var' var }
@@ -1301,13 +1303,15 @@ lintCoreRule fun fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
                               , ru_args = args, ru_rhs = rhs })
   = lintBinders bndrs $ \ _ ->
     do { lhs_ty <- foldM lintCoreArg fun_ty args
-       ; let n_ambient_args | Just join_arity <- isJoinId_maybe fun
-                            = join_arity - length args
-                            | otherwise
-                            = 0
-       ; rhs_ty <- markAllJoinsBadIf (not (isJoinId fun)) $
-                   withAmbientArgs n_ambient_args $
-                   lintCoreExpr rhs
+       ; rhs_ty <- case isJoinId_maybe fun of
+                     Just join_arity
+                       | (Var fun', args') <- collectArgs rhs
+                       , let n_extra_args = join_arity - length args
+                               -- See Note [Rules for join points]
+                       -> do { fun'_ty <- lintCoreApp fun' args' n_extra_args
+                             ; addLoc (AnExpr rhs) $
+                                 lintCoreArgs fun'_ty args' }
+                     _ -> markAllJoinsBad $ lintCoreExpr rhs
        ; ensureEqTys lhs_ty rhs_ty $
          (rule_doc <+> vcat [ text "lhs type:" <+> ppr lhs_ty
                             , text "rhs type:" <+> ppr rhs_ty ])
@@ -1348,26 +1352,37 @@ we'll end up with
 This seems sufficiently obscure that there isn't enough payoff to
 try to trim the forall'd binder list.
 
-Note [Ambient args in rules]
+Note [Rules for join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A rule for a join point doesn't necessarily match all the join point's
-arguments. Since the join point always occurs in saturated calls, however, this
-is not a problem because the rule's RHS will only be put into contexts that
-supply enough arguments to maintain the saturation invariant. We just have to
-remember when checking the rule's RHS that any join points will actually be
-taking some extra arguments.
+A join point cannot be partially applied. However, the left-hand side of a rule
+for a join point may still have the form of an undersaturated jump:
 
-CoreLint assumes that all rules for join points have the very simple forms
-created by Specialise and SpecConstr, such as:
+  join j :: forall a. Eq a => a -> a -> String
+       {-# RULES "SPEC j" jump j @ Int $dEq = ... #-}
+       j @a $dEq x y = ...
 
-  $j @ Int $dEqInt = $s$j
+The LHS of a rule is effectively a *pattern*, not a piece of code, and nothing
+is unsound about replacing a jump and a prefix of its arguments.
 
-The RHS is just an application, not a case or a lambda or anything more
-interesting. Since all join points are local bindings and the user can only
-declare RULES on globals, it is safe (as of this writing!) to make this
-assumption and just suppose that all jumps (i.e. calls to join points) take
-some n extra arguments.
+What's odder is that the RHS might *also* be a "partial jump":
+
+  jump j @ Int $dEqInt = jump $sj
+
+If $sj has join arity 2, then applying this rule still can't make a well-typed
+program into an ill-typed one, since jumps to j must have all four arguments:
+
+  jump j @ Int $dEqInt 2 4 ==> jump $sj 2 4
+
+As the example suggests, this shows up when the specialiser specialises a join
+point, since it makes its rule match as few arguments as necessary. To make this
+legitimate, we need a special case. Thus, when the LHS is a jump with n
+arguments to a join point of join arity n+k:
+
+  1. If the RHS is a jump, it must be undersaturated by exactly k.
+  2. Otherwise, the RHS must not contain a jump to a free join id at all. (In
+     other words, the RHS is not a tail context, so calls from there don't count
+     as tail calls.)
 -}
 
 {-
@@ -1719,7 +1734,6 @@ data LintEnv
                                      -- both Ids and TyVars
        , le_bad_joins :: IdSet       -- Join points that have left scope
        , le_dynflags :: DynFlags     -- DynamicFlags
-       , le_ambient_args :: Int      -- Number of arguments in context
        }
 
 data LintFlags
@@ -1849,8 +1863,7 @@ initL dflags flags m
       (_, errs) -> errs
   where
     env = LE { le_flags = flags, le_subst = emptyTCvSubst, le_loc = []
-             , le_dynflags = dflags, le_bad_joins = emptyVarSet
-             , le_ambient_args = 0 }
+             , le_dynflags = dflags, le_bad_joins = emptyVarSet }
 
 getLintFlags :: LintM LintFlags
 getLintFlags = LintM $ \ env errs -> (Just (le_flags env), errs)
@@ -1956,15 +1969,6 @@ markAllJoinsBad m
 markAllJoinsBadIf :: Bool -> LintM a -> LintM a
 markAllJoinsBadIf True  m = markAllJoinsBad m
 markAllJoinsBadIf False m = m
-
-withAmbientArgs :: Int -> LintM a -> LintM a
-withAmbientArgs n m
-  = LintM $ \ env errs ->
-      unLintM m (env { le_ambient_args = le_ambient_args env + n }) errs
-
-getAmbientArgs :: LintM Int
-getAmbientArgs
-  = LintM $ \ env errs -> (Just (le_ambient_args env), errs)
 
 getTCvSubst :: LintM TCvSubst
 getTCvSubst = LintM (\ env errs -> (Just (le_subst env), errs))
@@ -2259,23 +2263,21 @@ mkBadJoinArityMsg :: Var -> Int -> Int -> SDoc
 mkBadJoinArityMsg var ar nlams
   = vcat [ text "Join point has too few lambdas",
            text "Join var:" <+> ppr var,
-           text "Arity:" <+> ppr ar,
+           text "Join arity:" <+> ppr ar,
            text "Number of lambdas:" <+> ppr nlams ]
 
 mkJoinOutOfScopeMsg :: Var -> SDoc
 mkJoinOutOfScopeMsg var
   = text "Join variable no longer in scope:" <+> ppr var
 
-mkBadJoinCallMsg :: Var -> Int -> Int -> SDoc
-mkBadJoinCallMsg var ar 0
-  = vcat [ text "Join point occurs unapplied",
-           text "Join var:" <+> ppr var,
-           text "Arity:" <+> ppr ar ]
-mkBadJoinCallMsg var ar nargs
+mkBadJumpMsg :: Var -> Int -> Int -> Int -> SDoc
+mkBadJumpMsg var ar nargs n_extra_args
   = vcat [ text "Join point invoked with wrong number of arguments",
            text "Join var:" <+> ppr var,
-           text "Arity:" <+> ppr ar,
-           text "Number of arguments:" <+> int nargs ]
+           text "Join arity:" <+> ppr ar,
+           text "Number of arguments:" <+> int nargs,
+           ppWhen (n_extra_args /= 0) $
+             text "  plus args missing from rule LHS:" <+> int n_extra_args ]
 
 mkInconsistentRecMsg :: [Var] -> SDoc
 mkInconsistentRecMsg bndrs
