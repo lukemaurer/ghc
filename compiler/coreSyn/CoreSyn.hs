@@ -470,6 +470,129 @@ this exhaustive list can be empty!
   conversion; remember STG is un-typed, so there is no need for
   the empty case to do the type conversion.
 
+Note [Join points]
+~~~~~~~~~~~~~~~~~~
+In Core, a *join point* is a specially tagged function whose only occurrences
+are saturated tail calls. A tail call can appear in these places:
+
+  1. In the branches (not the scrutinee) of a case
+  2. Underneath a let (value or join point)
+  3. Inside another join point
+
+We write a join-point declaration as
+  join j @a @b x y = e1 in e2,
+like a let binding but with "join" instead (or "join rec" for "let rec"). Note
+that we put the parameters before the = rather than using lambdas; this is
+because it's relevant how many parameters the join point takes *as a join
+point.* Note that a join point may return a lambda! So
+  join j x = x + 1
+is different from
+  join j = \x -> x + 1
+
+The identifier for a join point is called a join id or a *label.* An invocation
+is called a *jump.* We write a jump using the jump keyword:
+
+  jump j 3
+
+The words *label* and *jump* are evocative of assembly code (or Cmm) for a
+reason: join points are indeed compiled as labeled blocks, and jumps become
+actual jumps (plus argument passing and stack adjustment). There is no closure
+allocated and only a fraction of the function-call overhead. Hence we would
+like as many functions as possible to become join points (see OccurAnal) and
+the type rules for join points ensure we preserve the properties that make them
+efficient.
+
+In the actual AST, a join point is indicated by the IdDetails of the binder: a
+local value binding gets 'VanillaId' but a join point gets a 'JoinId' with its
+join arity.
+
+For more details, see the paper:
+
+  Luke Maurer, Paul Downen, Zena Ariola, and Simon Peyton Jones. "Compiling
+  without continuations." Submitted to PLDI'17.
+
+  https://www.microsoft.com/en-us/research/publication/compiling-without-continuations/
+
+Note [Invariants on join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In order to be a join point, a binder must follow these invariants:
+
+  1. All occurrences must be tail calls. Each of these tail calls must pass the
+     same number of arguments, counting both types and values; we call this the
+     "join arity" (to distinguish from regular arity, which only counts values).
+  2. For join arity n, the right-hand side must begin with at least n lambdas.
+  3. If the binding is recursive, then:
+       a. For a join arity n, the right-hand side must begin with exactly n
+          lambdas.
+       b. All other bindings in the recursive group must also be join points.
+  4. The binding's type must not be polymorphic in its return type. See
+     'Type.isValidJoinPointType'.
+
+Strictly speaking, invariant 2 is redundant, since the rigorous definition of
+"tail call" circumscribes the contexts in which a tail call may appear; the
+right-hand side of a non-join-point definition is not such a context, and
+neither would be the RHS of a join point with extra lambdas. See Section 3 of
+the paper (Note [Join points]).
+
+Core Lint will check these invariants, anticipating that any binder whose
+OccInfo is marked AlwaysTailCalled will become a join point as soon as the
+simplifier (or simpleOptPgm) runs.
+
+Note [The type of a join point]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A join point has the same type it would have as a function. That is, if it takes
+an Int and a Bool and its body produces a String, its type is `Int -> Bool ->
+String`. Natural as this may seem, it can be awkward. A join point shouldn't be
+thought to "return" in the same sense a function does---a jump is one-way. This
+is crucial for understanding how case-of-case interacts with join points:
+
+  case (join
+          j :: Int -> Bool -> String
+          j x y = ...
+        in
+          jump j z w) of
+    "" -> True
+    _  -> False
+
+The simplifier will pull the case into the join point (see Note [Case-of-case
+and join points] in Simplify):
+
+  join
+    j :: Int -> Bool -> Bool -- changed!
+    j x y = case ... of "" -> True
+                        _  -> False
+  in
+    jump j z w
+
+The body of the join point now returns a Bool, so the label `j` has to have its
+type updated accordingly. Inconvenient though this may be, it has the advantage
+that 'CoreUtils.exprType' can still return a type for any expression, including
+a jump.
+
+This differs from the paper (see Note [Invariants on join points]). In the
+paper, we instead give j the type `Int -> Bool -> forall a. a`. Then each jump
+carries the "return type" as a parameter, exactly the way other non-returning
+functions like `error` work:
+
+  case (join
+          j :: Int -> Bool -> forall a. a
+          j x y = ...
+        in
+          jump j z w @String) of
+    "" -> True
+    _  -> False
+
+Now we can move the case inward and we only have to change the jump:
+
+  join
+    j :: Int -> Bool -> forall a. a
+    j x y = case ... of "" -> True
+                        _  -> False
+  in
+    jump j z w @Bool
+
+(Core Lint would still check that the body of the join point has the right type;
+that type would simply not be reflected in the join id.)
 
 ************************************************************************
 *                                                                      *

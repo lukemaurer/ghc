@@ -145,7 +145,7 @@ data IdDetails
                -- This only covers /un-lifted/ coercions, of type
                -- (t1 ~# t2) or (t1 ~R# t2), not their lifted variants
   | JoinId JoinArity           -- ^ An 'Id' for a join point taking n arguments
-       -- Note [Join points]
+       -- Note [Join points] in CoreSyn
 
 -- | Recursive Selector Parent
 data RecSelParent = RecSelData TyCon | RecSelPatSyn PatSyn deriving Eq
@@ -198,66 +198,6 @@ pprIdDetails other     = brackets (pp other)
    pp (JoinId arity)    = text "JoinId" <> parens (int arity)
 
 {-
-Note [Join points]
-
-In Core, a *join point* is a specially tagged function whose only occurrences
-are saturated tail calls. A tail call can appear in these places:
-
-  1. In the branches (not the scrutinee) of a case
-  2. Underneath a let (value or join point)
-  3. Inside another join point
-
-We write a join-point declaration as
-  join j @a @b x y = e1 in e2,
-like a let binding but with "join" instead (or "join rec" for "let rec"). Note
-that we put the parameters before the = rather than using lambdas; this is
-because it's relevant how many parameters the join point takes *as a join
-point.* Note that a join point may return a lambda! So
-  join j x = x + 1
-is different from
-  join j = \x -> x + 1
-
-The identifier for a join point is called a join id or a *label.* An invocation
-is called a *jump.* We write a jump using the jump keyword:
-
-  jump j 3
-
-The words *label* and *jump* are evocative of assembly code (or Cmm) for a
-reason: join points are indeed compiled as labeled blocks, and jumps become
-actual jumps (plus argument passing and stack adjustment). There is no closure
-allocated and only a fraction of the function-call overhead. Hence we would
-like as many functions as possible to become join points (see OccurAnal) and
-the type rules for join points ensure we preserve the properties that make them
-efficient.
-
-Note [Invariants on join points]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-In order to be a join point, a binder must follow these invariants:
-
-  1. All occurrences must be tail calls. Each of these tail calls must pass the
-     same number of arguments, counting both types and values; we call this the
-     "join arity" (to distinguish from regular arity, which only counts values).
-  2. The binding's type must not be polymorphic in its return type. See
-     'Type.isValidJoinPointType'.
-  3. If the binding is recursive, then:
-       a. For a join arity n, the right-hand side must begin with exactly n
-          lambdas.
-       b. All other bindings in the recursive group must also be join points.
-
-Strictly speaking, invariant 3 is redundant, since the rigorous definition of
-"tail call" circumscribes the contexts in which a tail call may appear; the
-right-hand side of a non-join-point definition is not such a context, and
-neither would be the RHS of a join point with a number of lambdas not equal to
-its join arity. See (link on the wiki under SequentCore):
-
-  Luke Maurer, Paul Downen, Zena Ariola, and Simon Peyton Jones. "Compiling
-  without continuations." Submitted to PLDI'17.
-
-Core Lint will check these invariants, anticipating that any binder whose
-IdDetails includes AlwaysTailCalled as its tailCallInfo will become a join
-point as soon as the simplifier runs.
-
 ************************************************************************
 *                                                                      *
 \subsection{The main IdInfo type}
