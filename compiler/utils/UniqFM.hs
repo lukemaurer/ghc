@@ -54,7 +54,6 @@ module UniqFM (
         minusUFM,
         intersectUFM,
         intersectUFM_C,
-        mergeUFM_Directly,
         disjointUFM,
         nonDetFoldUFM, foldUFM, nonDetFoldUFM_Directly,
         anyUFM, allUFM, seqEltsUFM,
@@ -71,7 +70,7 @@ module UniqFM (
         pprUniqFM, pprUFM, pprUFMWithKeys, pluralUFM
     ) where
 
-import Unique           ( Uniquable(..), Unique, getKey, mkUniqueGrimily )
+import Unique           ( Uniquable(..), Unique, getKey )
 import Outputable
 
 import Data.List (foldl')
@@ -243,22 +242,6 @@ intersectUFM_C
   -> UniqFM elt2
   -> UniqFM elt3
 intersectUFM_C f (UFM x) (UFM y) = UFM (M.intersectionWith f x y)
-
--- | Universal combining function. See 'Data.IntMap.mergeWithKey' for the API.
--- Importantly, like that function, this one is inlined whenever given three
--- arguments, so use it to define your own operator rather than in place.
-mergeUFM_Directly
-  :: (Unique -> elt1 -> elt2 -> Maybe elt3)
-  -> (UniqFM elt1 -> UniqFM elt3) -> (UniqFM elt2 -> UniqFM elt3)
-  -> UniqFM elt1 -> UniqFM elt2
-  -> UniqFM elt3
-mergeUFM_Directly combine only1 only2 (UFM x) (UFM y)
-  = UFM $ M.mergeWithKey
-      (\k e1 e2 -> combine (mkUniqueGrimily k) e1 e2)
-      (\x' -> case only1 (UFM x') of UFM z -> z)
-      (\y' -> case only2 (UFM y') of UFM z -> z)
-      x y
-{-# INLINE mergeUFM_Directly #-}
 
 disjointUFM :: UniqFM elt1 -> UniqFM elt2 -> Bool
 disjointUFM (UFM x) (UFM y) = M.null (M.intersection x y)
