@@ -72,7 +72,6 @@ import Data.Function (fix)
 import Data.Maybe
 import Pair
 import qualified GHC.LanguageExtensions as LangExt
-import Data.List
 
 {-
 Note [GHC Formalism]
@@ -193,7 +192,7 @@ endPassIO :: HscEnv -> PrintUnqualified
 endPassIO hsc_env print_unqual pass binds rules
   = do { dumpPassResult dflags print_unqual mb_flag
                         (ppr pass) (pprPassDetails pass) binds rules
-       ; lintPassResult hsc_env pass empty binds }
+       ; lintPassResult hsc_env pass binds }
   where
     dflags  = hsc_dflags hsc_env
     mb_flag = case coreDumpFlag pass of
@@ -268,27 +267,24 @@ coreDumpFlag (CoreDoPasses {})        = Nothing
 ************************************************************************
 -}
 
-lintPassResult :: HscEnv -> CoreToDo -> SDoc -> CoreProgram -> IO ()
-lintPassResult hsc_env pass extra_hdr binds
+lintPassResult :: HscEnv -> CoreToDo -> CoreProgram -> IO ()
+lintPassResult hsc_env pass binds
   | not (gopt Opt_DoCoreLinting dflags)
   = return ()
   | otherwise
-  = do { let (warns, errs) = lintCoreBindings dflags pass
-                               (interactiveInScope hsc_env) binds
-       ; Err.showPass dflags $
-           "Core Linted result of " ++ showSDoc dflags (ppr pass <+> extra_hdr)
-       ; displayLintResults dflags pass extra_hdr warns errs binds  }
+  = do { let (warns, errs) = lintCoreBindings dflags pass (interactiveInScope hsc_env) binds
+       ; Err.showPass dflags ("Core Linted result of " ++ showPpr dflags pass)
+       ; displayLintResults dflags pass warns errs binds  }
   where
     dflags = hsc_dflags hsc_env
 
-displayLintResults :: DynFlags -> CoreToDo -> SDoc
+displayLintResults :: DynFlags -> CoreToDo
                    -> Bag Err.MsgDoc -> Bag Err.MsgDoc -> CoreProgram
                    -> IO ()
-displayLintResults dflags pass extra_hdr warns errs binds
+displayLintResults dflags pass warns errs binds
   | not (isEmptyBag errs)
   = do { log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
-           (vcat [ lint_banner "errors" (ppr pass <+> extra_hdr)
-                 , Err.pprMessageBag errs
+           (vcat [ lint_banner "errors" (ppr pass), Err.pprMessageBag errs
                  , text "*** Offending Program ***"
                  , pprCoreBindings binds
                  , text "*** End of Offense ***" ])
@@ -297,9 +293,8 @@ displayLintResults dflags pass extra_hdr warns errs binds
   | not (isEmptyBag warns)
   , not opt_NoDebugOutput
   , showLintWarnings pass
-  = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle $
-        lint_banner "warnings" (ppr pass <+> extra_hdr) $$
-        Err.pprMessageBag warns
+  = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
+        (lint_banner "warnings" (ppr pass) $$ Err.pprMessageBag warns)
 
   | otherwise = return ()
   where
@@ -682,14 +677,14 @@ lintCoreExpr (Let (NonRec tv (Type ty)) body)
                 -- Now extend the substitution so we
                 -- take advantage of it in the body
         ; extendSubstL tv ty'        $
-          addLoc (BodyOfLet tv)      $
+          addLoc (BodyOfLetRec [tv]) $
           lintCoreExpr body } }
 
 lintCoreExpr (Let (NonRec bndr rhs) body)
   | isId bndr
   = do  { lintSingleBinding NotTopLevel NonRecursive (bndr,rhs)
-        ; addLoc (BodyOfLet bndr)
-                 (lintIdBndr NotTopLevel bndr $ \_ -> (lintCoreExpr body)) }
+        ; addLoc (BodyOfLetRec [bndr])
+                 (lintIdBndr NotTopLevel bndr $ \_ -> lintCoreExpr body) }
 
   | otherwise
   = failWithL (mkLetErr bndr rhs)       -- Not quite accurate
@@ -1707,12 +1702,9 @@ data LintEnv
        }
 
 data LintFlags
-  = LF { lf_check_global_ids           :: Bool
-           -- See Note [Checking for global Ids]
-       , lf_check_inline_loop_breakers :: Bool
-           -- See Note [Checking for INLINE loop breakers]
-       , lf_check_static_ptrs          :: Bool
-           -- See Note [Checking StaticPtrs]
+  = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
+       , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
+       , lf_check_static_ptrs          :: Bool -- See Note [Checking StaticPtrs]
     }
 
 defaultLintFlags :: LintFlags
@@ -1817,7 +1809,6 @@ instance HasDynFlags LintM where
 data LintLocInfo
   = RhsOf Id            -- The variable bound
   | LambdaBodyOf Id     -- The lambda-binder
-  | BodyOfLet Var       -- The variable bound
   | BodyOfLetRec [Id]   -- One of the binders
   | CaseAlt CoreAlt     -- Case alternative
   | CasePat CoreAlt     -- The *pattern* of the case alternative
@@ -1870,17 +1861,11 @@ addMsg env msgs msg
    locs = le_loc env
    (loc, cxt1) = dumpLoc (head locs)
    cxts        = [snd (dumpLoc loc) | loc <- locs]
-   root_cxt    = case find not_top_level (reverse (tail locs)) of
-                   Just root_loc -> snd (dumpLoc root_loc)
-                   Nothing       -> empty
-   context     | opt_PprStyle_Debug = vcat (reverse cxts) $$
+   context     | opt_PprStyle_Debug = vcat (reverse cxts) $$ cxt1 $$
                                       text "Substitution:" <+> ppr (le_subst env)
-               | otherwise          = root_cxt $$ cxt1
+               | otherwise          = cxt1
 
    mk_msg msg = mkLocMessage SevWarning (mkSrcSpan loc loc) (context $$ msg)
-
-   not_top_level TopLevelBindings = False
-   not_top_level _                = True
 
 addLoc :: LintLocInfo -> LintM a -> LintM a
 addLoc extra_loc m
@@ -2008,9 +1993,6 @@ dumpLoc (RhsOf v)
 
 dumpLoc (LambdaBodyOf b)
   = (getSrcLoc b, brackets (text "in body of lambda with binder" <+> pp_binder b))
-
-dumpLoc (BodyOfLet b)
-  = (getSrcLoc b, brackets (text "in body of let with binder" <+> pp_binder b))
 
 dumpLoc (BodyOfLetRec [])
   = (noSrcLoc, brackets (text "In body of a letrec with no binders"))
