@@ -24,7 +24,6 @@ module SimplUtils (
         countArgs,
         mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
         interestingCallContext,
-        lintCont,
 
         -- ArgInfo
         ArgInfo(..), ArgSpec(..), mkArgInfo,
@@ -686,96 +685,6 @@ interestingArg env e = go env 0 e
        | otherwise         = TrivArg    -- n==0, no useful unfolding
        where
          conlike_unfolding = isConLikeUnfolding (idUnfolding v)
-
-{-
-************************************************************************
-*                                                                      *
-                  lintCont
-*                                                                      *
-************************************************************************
-
-The lintCont function is useful for finding errors early, but it's expensive.
-Accordingly the use in simplExprF is commented out.
--}
-
-lintCont :: String -> SDoc -> SimplEnv -> InExpr -> SimplCont -> Bool
--- ^ Perform typechecking on the given continuation, given the expression it's
--- being applied to. Returns True on success; panics with detailed message on
--- failure. (The expression argument is needed because if this is an invocation
--- of a join point, the outer context will get thrown out, so the likely type
--- mismatch doesn't matter.)
-lintCont _ _ _ (Type _) _
-  = True -- FIXME Types get passed with wrong Stop continuations for some reason
-
-lintCont hdr doc env e orig_cont
-  | Var v <- fun
-  , isJoinId v
-  = True -- Continuation will get thrown out anyway (besides some arguments)
-  | otherwise
-  = go orig_ty orig_cont
-  where
-    orig_ty = substTy env $ case e of Type ty -> typeKind ty; _ -> exprType e
-    (fun, _) = collectArgs e
-
-    go :: OutType -> SimplCont -> Bool
-    go ty (Stop ty' _)
-      = check_ty (text "Stopped at") ty ty' True
-    go ty (CastIt co k)
-      = check_ty (text "Cast from") ty from_ty $
-        go to_ty k
-      where Pair from_ty to_ty = coercionKind co
-    go ty (ApplyToVal { sc_arg = arg, sc_env = se, sc_cont = k })
-      | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
-      = check_ty (text "Argument type") arg_ty (substTy se (exprType arg)) $
-        go res_ty k
-      | otherwise
-      = die (text "Not a function type:" <+> ppr ty)
-    go ty (ApplyToTy { sc_arg_ty = ty_arg, sc_hole_ty = hole_ty, sc_cont = k })
-      | Just (tv, _res_ty) <- splitForAllTy_maybe ty
-      = check_ty (text "Argument kind") (idType tv) (typeKind ty_arg) $
-        check_ty (text "Hole type") hole_ty ty $
-        go (piResultTy ty ty_arg) k
-      | otherwise
-      = die (text "Not a forall type:" <+> ppr ty)
-    go ty (Select { sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = k })
-      = check_ty (text "Case binder type") ty (substTy se (idType bndr)) $
-        case alts of
-          [] -> go (contHoleType k) k -- empty case can nominally return any
-                                      -- type
-          (_, _, e) : alts'
-            -> let alt_ty = substTy se (exprType e)
-               in foldr (\(_, _, e) -> check_ty (text "Alt type") alt_ty
-                                         (substTy se (exprType e)))
-                    (go alt_ty k)
-                    alts'
-    go ty (StrictBind bndr bndrs body se k)
-      = check_ty (text "Strict binder type") ty (substTy se (idType bndr)) $
-        go (substTy se (mkLamTypes bndrs (exprType body))) k
-    go ty (StrictArg ai _ k)
-      | Just (arg_ty, res_ty) <- splitFunTy_maybe (ai_type ai)
-      = check_ty (text "Strict arg type") ty arg_ty $
-        isJoinId (ai_fun ai) || -- join point return types are unstable
-        go res_ty k
-      | otherwise
-      = die (text "Not a function type:" <+> ppr (ai_type ai))
-    go ty (TickIt _ k)
-      = go ty k
-
-    check_ty msg exp act next
-      = check (act `eqType` exp)
-          (sep [msg <+> ppr act <> char ';', text "expected" <+> ppr exp])
-          next
-
-    check cond msg next
-      = if cond then next else die msg
-
-    die msg
-      = pprPanic hdr $
-        vcat [ text "Error in continuation"
-             , msg
-             , ppr orig_cont
-             , text "Expr:" <+> ppr e
-             , doc ]
 
 {-
 ************************************************************************
