@@ -657,7 +657,7 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = lintCoreApp var [] 0
+  = lintCoreApp var []
 
 lintCoreExpr (Lit lit)
   = return (literalType lit)
@@ -720,7 +720,7 @@ lintCoreExpr (Let (Rec pairs) body)
     (_, dups) = removeDups compare bndrs
 
 lintCoreExpr e@(App _ _)
-    = do { fun_ty <- case fun of Var f -> lintCoreApp f args 0
+    = do { fun_ty <- case fun of Var f -> lintCoreApp f args
                                  _     -> markAllJoinsBad $ lintCoreExpr fun
          ; addLoc (AnExpr e) $ lintCoreArgs fun_ty args }
   where
@@ -790,12 +790,10 @@ lintCoreExpr (Coercion co)
        ; return (mkHeteroCoercionType role k1 k2 ty1 ty2) }
 
 lintCoreApp :: Var -> [CoreExpr]
-            -> Int -- Assume this many extra arguments
-                   -- See Note [Rules for join points]
             -> LintM Type -- returns type of the *function*
 -- Checks that this function can be applied to this many arguments, *not* the
 -- arguments themselves
-lintCoreApp var args n_extra_args
+lintCoreApp var args
   = do  { checkL (isNonCoVarId var)
                  (text "Non term variable" <+> ppr var)
 
@@ -830,8 +828,8 @@ lintCoreApp var args n_extra_args
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
-                  ; checkL (args `lengthIs` (join_arity - n_extra_args)) $
-                      mkBadJumpMsg var' join_arity (length args) n_extra_args }
+                  ; checkL (args `lengthIs` join_arity) $
+                      mkBadJumpMsg var' join_arity (length args) }
             Nothing ->
               do  { checkL (not (isJoinId var)) $
                       mkJoinBndrOccMismatchMsg var' var }
@@ -1299,18 +1297,16 @@ lintCoreRule :: OutVar -> OutType -> CoreRule -> LintM ()
 lintCoreRule _ _ (BuiltinRule {})
   = return ()  -- Don't bother
 
-lintCoreRule fun fun_ty (Rule { ru_name = name, ru_bndrs = bndrs
-                              , ru_args = args, ru_rhs = rhs })
+lintCoreRule fun fun_ty rule@(Rule { ru_name = name, ru_bndrs = bndrs
+                                   , ru_args = args, ru_rhs = rhs })
   = lintBinders bndrs $ \ _ ->
     do { lhs_ty <- foldM lintCoreArg fun_ty args
        ; rhs_ty <- case isJoinId_maybe fun of
                      Just join_arity
-                       | (Var fun', args') <- collectArgs rhs
-                       , let n_extra_args = join_arity - length args
+                       -> do { checkL (args `lengthIs` join_arity) $
+                                 mkBadJoinPointRuleMsg fun join_arity rule
                                -- See Note [Rules for join points]
-                       -> do { fun'_ty <- lintCoreApp fun' args' n_extra_args
-                             ; addLoc (AnExpr rhs) $
-                                 lintCoreArgs fun'_ty args' }
+                             ; lintCoreExpr rhs }
                      _ -> markAllJoinsBad $ lintCoreExpr rhs
        ; ensureEqTys lhs_ty rhs_ty $
          (rule_doc <+> vcat [ text "lhs type:" <+> ppr lhs_ty
@@ -1356,33 +1352,21 @@ Note [Rules for join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A join point cannot be partially applied. However, the left-hand side of a rule
-for a join point may still have the form of an undersaturated jump:
+for a join point is effectively a *pattern*, not a piece of code, so there's an
+argument to be made for allowing a situation like this:
 
-  join j :: forall a. Eq a => a -> a -> String
-       {-# RULES "SPEC j" jump j @ Int $dEq = ... #-}
+  join $sj :: Int -> Int -> String
+       $sj n m = ...
+       j :: forall a. Eq a => a -> a -> String
+       {-# RULES "SPEC j" jump j @ Int $dEq = jump $sj #-}
        j @a $dEq x y = ...
 
-The LHS of a rule is effectively a *pattern*, not a piece of code, and nothing
-is unsound about replacing a jump and a prefix of its arguments.
-
-What's odder is that the RHS might *also* be a "partial jump":
-
-  jump j @ Int $dEqInt = jump $sj
-
-If $sj has join arity 2, then applying this rule still can't make a well-typed
-program into an ill-typed one, since jumps to j must have all four arguments:
-
-  jump j @ Int $dEqInt 2 4 ==> jump $sj 2 4
-
-As the example suggests, this shows up when the specialiser specialises a join
-point, since it makes its rule match as few arguments as necessary. To make this
-legitimate, we need a special case. Thus, when the LHS is a jump with n
-arguments to a join point of join arity n+k:
-
-  1. If the RHS is a jump, it must be undersaturated by exactly k.
-  2. Otherwise, the RHS must not contain a jump to a free join id at all. (In
-     other words, the RHS is not a tail context, so calls from there don't count
-     as tail calls.)
+Applying this rule can't turn a well-typed program into an ill-typed one, so
+conceivably we could allow it. But we can always eta-expand such an
+"undersaturated" rule (see 'CoreArity.etaExpandToJoinPointRule'), and in fact
+the simplifier would have to in order to deal with the RHS. So we take a
+conservative view and don't allow undersaturated rules for join points. See
+Note [Rules and join points] in OccurAnal for further discussion.
 -}
 
 {-
@@ -2270,14 +2254,12 @@ mkJoinOutOfScopeMsg :: Var -> SDoc
 mkJoinOutOfScopeMsg var
   = text "Join variable no longer in scope:" <+> ppr var
 
-mkBadJumpMsg :: Var -> Int -> Int -> Int -> SDoc
-mkBadJumpMsg var ar nargs n_extra_args
+mkBadJumpMsg :: Var -> Int -> Int -> SDoc
+mkBadJumpMsg var ar nargs
   = vcat [ text "Join point invoked with wrong number of arguments",
            text "Join var:" <+> ppr var,
            text "Join arity:" <+> ppr ar,
-           text "Number of arguments:" <+> int nargs,
-           ppWhen (n_extra_args /= 0) $
-             text "  plus args missing from rule LHS:" <+> int n_extra_args ]
+           text "Number of arguments:" <+> int nargs ]
 
 mkInconsistentRecMsg :: [Var] -> SDoc
 mkInconsistentRecMsg bndrs
@@ -2305,6 +2287,13 @@ mkBndrOccTypeMismatchMsg bndr var bndr_ty var_ty
          , text "Binder type:" <+> ppr bndr_ty
          , text "Occurrence type:" <+> ppr var_ty
          , text "  Before subst:" <+> ppr (idType var) ]
+
+mkBadJoinPointRuleMsg :: JoinId -> JoinArity -> CoreRule -> SDoc
+mkBadJoinPointRuleMsg bndr join_arity rule
+  = vcat [ text "Join point has rule with wrong number of arguments"
+         , text "Var:" <+> ppr bndr
+         , text "Join arity:" <+> ppr join_arity
+         , text "Rule:" <+> ppr rule ]
 
 pprLeftOrRight :: LeftOrRight -> MsgDoc
 pprLeftOrRight CLeft  = text "left"

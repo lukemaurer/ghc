@@ -678,27 +678,21 @@ Things get fiddly with rules. Suppose we have:
 
 Now suppose that both j and k appear only as saturated tail calls in the body.
 Thus we would like to make them both join points. The rule complicates matters,
-though, as its RHS has an unapplied occurrence of j. *However*, any application
-of k will be saturated (since k is a join point), so if the rule fires, it still
-results in a valid tail call:
+though, as its RHS has an unapplied occurrence of j. *However*, if we were to
+eta-expand the rule, all would be well:
 
-  k 0 q ==> j q
+  {-# RULES "SPEC k 0" forall a. k 0 a = j a #-}
 
-So conceivably we could be very careful and still make join points from things
-mentioned in RULES, but for the moment we punt and count anything on the RHS of
-a rule as occurring in non-tail position.
-
-Note that if Specialise or SpecConstr specialises a join point, it will create
-a join point, often (in the case of Specialise) involving partial applications.
-Thus our conservative analysis will think that the new join point *shouldn't* be
-one. But the occurrence analyser is only in charge of finding *new* join points,
-so this is no emergency. In particular, being overly cautious about rules only
+So conceivably we could notice that a potential join point would have an
+"undersaturated" rule and account for it. This would mean we could make
+something that's been specialised a join point, for instance. But local bindings
+are rarely specialised, and being overly cautious about rules only
 costs us anything when, for some `j`:
 
-  * At time `t0`, `j` has non-tail calls, so it can't be a join point.
-  * At time `t1`, `j` gets specialised and thus acquires rules.
-  * At time `t2`, the non-tail calls to `j` disappear (as dead code, say), and
-    so now `t2` *could* become a join point.
+  * Before specialisation, `j` has non-tail calls, so it can't be a join point.
+  * During specialisation, `j` gets specialised and thus acquires rules.
+  * Sometime afterward, the non-tail calls to `j` disappear (as dead code, say),
+    and so now `t2` *could* become a join point.
 
 This happens, but rarely. And in the non-recursive case, we can still make `j`
 a join point, just not its specialised version.
@@ -771,9 +765,13 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
     rhs_usage2 = case occAnalUnfolding env NonRecursive binder of
                    Just unf_usage -> rhs_usage1 +++ unf_usage
                    Nothing        -> rhs_usage1
-       -- See Note [Rules, unfoldings, and join points]
+       -- See Note [Unfoldings and join points]
 
-    rhs_usage3 = addManyOccsSet rhs_usage2 (idRuleVars binder)
+    mb_join_arity = willBeJoinId_maybe tagged_binder
+    rules_w_uds = occAnalRules env mb_join_arity NonRecursive tagged_binder
+
+    rhs_usage3 = rhs_usage2 +++ combineUsageDetailsList
+                                  (map (\(_, l, r) -> l +++ r) rules_w_uds)
        -- See Note [Rules are extra RHSs] and Note [Rule dependency info]
 
     rhs_usage4 = maybe rhs_usage3 (addManyOccsSet rhs_usage3) $
@@ -805,19 +803,12 @@ occAnalRecBind env lvl imp_rule_edges pairs body_usage
     bndr_set = mkVarSet (map fst pairs)
 
 {-
-Note [Rules, unfoldings, and join points]
+Note [Unfoldings and join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We assume that anything in an unfolding occurs multiple times, since unfoldings
 are often copied (that's the whole point!). But we still need to track tail
 calls for the purpose of finding join points.
-
-With rules, things are different. Rules for local bindings are only ever created
-by specialisation, and specialising a join point already creates a join point.
-It's highly unlikely that a function would be eligible to become a join point
-only after it's been specialized. Thus we assume that nothing on the right-hand
-side of a rule can be made a join point. This could be relaxed, but at a
-considerable cost in complexity.
 -}
 
 -----------------------------
@@ -1223,7 +1214,7 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
     (bndrs, body) = collectBinders rhs
     (rhs_usage1, bndrs', body') = occAnalRecRhs env bndrs body
     rhs' = mkLams bndrs' body'
-    rhs_usage2 = addManyOccsSet rhs_usage1 all_rule_fvs
+    rhs_usage2 = rhs_usage1 +++ all_rule_uds
                    -- Note [Rules are extra RHSs]
                    -- Note [Rule dependency info]
     rhs_usage3 = case mb_unf_uds of
@@ -1233,20 +1224,20 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
 
     -- Finding the free variables of the rules
     is_active = occ_rule_act env :: Activation -> Bool
-    rules = filterOut isBuiltinRule (idCoreRules bndr)
-    rules_w_fvs :: [(Activation, VarSet)]    -- Find the RHS fvs
-    rules_w_fvs = maybe id (\ids -> ((AlwaysActive, ids):)) (lookupVarEnv imp_rule_edges bndr)
-                   -- See Note [Preventing loops due to imported functions rules]
-                  [ (ru_act rule, fvs)
-                  | rule <- rules
-                  , let fvs = exprFreeVars (ru_rhs rule)
-                              `delVarSetList` ru_bndrs rule
-                  , not (isEmptyVarSet fvs) ]
-    all_rule_fvs = rule_lhs_fvs `unionVarSet` rule_rhs_fvs
-    rule_rhs_fvs = mapUnionVarSet snd rules_w_fvs
-    rule_lhs_fvs = mapUnionVarSet (\ru -> exprsFreeVars (ru_args ru)
-                                          `delVarSetList` ru_bndrs ru) rules
-    active_rule_fvs = unionVarSets [fvs | (a,fvs) <- rules_w_fvs, is_active a]
+
+    rules_w_uds :: [(CoreRule, UsageDetails, UsageDetails)]
+    rules_w_uds = occAnalRules env (Just (length bndrs)) Recursive bndr
+
+    rules_w_rhs_fvs :: [(Activation, VarSet)]    -- Find the RHS fvs
+    rules_w_rhs_fvs = maybe id (\ids -> ((AlwaysActive, ids):))
+                               (lookupVarEnv imp_rule_edges bndr)
+      -- See Note [Preventing loops due to imported functions rules]
+                      [ (ru_act rule, udFreeVars bndr_set rhs_uds)
+                      | (rule, _, rhs_uds) <- rules_w_uds ]
+    all_rule_uds = combineUsageDetailsList $
+                     concatMap (\(_, l, r) -> [l, r]) rules_w_uds
+    active_rule_fvs = unionVarSets [fvs | (a,fvs) <- rules_w_rhs_fvs
+                                        , is_active a]
 
     -- Finding the usage details of the INLINE pragma (if any)
     mb_unf_uds = occAnalUnfolding env Recursive bndr
@@ -1498,6 +1489,15 @@ Hence the is_lb field of NodeScore
 ************************************************************************
 -}
 
+occAnalRhs :: OccEnv -> RecFlag -> Id -> [CoreBndr] -> CoreExpr
+           -> (UsageDetails, [CoreBndr], CoreExpr)
+              -- Returned usage details covers only the RHS,
+              -- and *not* the RULE or INLINE template for the Id
+occAnalRhs env Recursive _ bndrs body
+  = occAnalRecRhs env bndrs body
+occAnalRhs env NonRecursive id bndrs body
+  = occAnalNonRecRhs env id bndrs body
+
 occAnalRecRhs :: OccEnv -> [CoreBndr] -> CoreExpr    -- Rhs lambdas, body
            -> (UsageDetails, [CoreBndr], CoreExpr)
               -- Returned usage details covers only the RHS,
@@ -1547,8 +1547,7 @@ occAnalUnfolding env rec_flag id
         -> Just $ zapDetails usage
         where
           (bndrs, body) = collectBinders rhs
-          (usage, _, _)  | isRec rec_flag = occAnalRecRhs env bndrs body
-                         | otherwise      = occAnalNonRecRhs env id bndrs body
+          (usage, _, _) = occAnalRhs env rec_flag id bndrs body
 
       DFunUnfolding { df_bndrs = bndrs, df_args = args }
         -> Just $ zapDetails (delDetailsList usage bndrs)
@@ -1557,6 +1556,37 @@ occAnalUnfolding env rec_flag id
 
       _ -> Nothing
 
+occAnalRules :: OccEnv
+             -> Maybe JoinArity -- If the binder is (or MAY become) a join
+                                -- point, what its join arity is (or WOULD
+                                -- become). See Note [Rules and join points].
+             -> RecFlag
+             -> Id
+             -> [(CoreRule,      -- Each (non-built-in) rule
+                  UsageDetails,  -- Usage details for LHS
+                  UsageDetails)] -- Usage details for RHS
+occAnalRules env mb_expected_join_arity rec_flag id
+  = [ (rule, lhs_uds, rhs_uds) | rule@Rule {} <- idCoreRules id
+                               , let (lhs_uds, rhs_uds) = occ_anal_rule rule ]
+  where
+    occ_anal_rule (Rule { ru_bndrs = bndrs, ru_args = args, ru_rhs = rhs })
+      = (lhs_uds, final_rhs_uds)
+      where
+        lhs_uds = addManyOccsSet emptyDetails $
+                    (exprsFreeVars args `delVarSetList` bndrs)
+        (rhs_bndrs, rhs_body) = collectBinders rhs
+        (rhs_uds, _, _) = occAnalRhs env rec_flag id rhs_bndrs rhs_body
+                            -- Note [Rules are extra RHSs]
+                            -- Note [Rule dependency info]
+        final_rhs_uds = adjust_tail_info bndrs $ markAllMany $
+                          (rhs_uds `delDetailsList` bndrs)
+    occ_anal_rule _
+      = (emptyDetails, emptyDetails)
+
+    adjust_tail_info bndrs uds -- see Note [Rules and join points]
+      = case mb_expected_join_arity of
+          Just ar | bndrs `lengthIs` ar -> uds
+          _                             -> markAllNonTailCalled uds
 {-
 Note [Cascading inlines]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2296,6 +2326,7 @@ instance Outputable UsageDetails where
 -- UsageDetails API
 
 (+++)          :: UsageDetails -> UsageDetails -> UsageDetails
+combineUsageDetailsList :: [UsageDetails] -> UsageDetails
 combineAltsUsageDetails :: UsageDetails -> UsageDetails -> UsageDetails
 mkOneOcc       :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
 addOneOcc      :: UsageDetails -> Id -> OccInfo -> UsageDetails
@@ -2317,6 +2348,7 @@ udFreeVars     :: VarSet -> UsageDetails -> VarSet
 
 -------------------
 (+++) = combineUsageDetailsWith addOccInfo
+combineUsageDetailsList = foldl (+++) emptyDetails
 combineAltsUsageDetails = combineUsageDetailsWith orOccInfo
 
 mkOneOcc env id int_cxt arity
@@ -2389,6 +2421,9 @@ udFreeVars bndrs ud = intersectUFM_C (\b _ -> b) bndrs (ud_env ud)
 combineUsageDetailsWith :: (OccInfo -> OccInfo -> OccInfo)
                         -> UsageDetails -> UsageDetails -> UsageDetails
 combineUsageDetailsWith plus_occ_info ud1 ud2
+  | isEmptyDetails ud1 = ud2
+  | isEmptyDetails ud2 = ud1
+  | otherwise
   = UD { ud_env       = plusVarEnv_C plus_occ_info (ud_env ud1) (ud_env ud2)
        , ud_z_many    = plusVarEnv (ud_z_many    ud1) (ud_z_many    ud2)
        , ud_z_in_lam  = plusVarEnv (ud_z_in_lam  ud1) (ud_z_in_lam  ud2)
@@ -2512,14 +2547,19 @@ canBecomeJoinPoints NotTopLevel rec_flag usage pairs
   where
     ok (bndr, bndrs)
       | isJoinId bndr
-      = False -- Already a join id (won't be in analysis anyway)
+      = False -- Already a join id
       | AlwaysTailCalled arity <- tailCallInfo (lookupDetails usage bndr)
       , not (isRec rec_flag && arity /= length bndrs)
           -- Recursive join points can't be partially applied
+      , all (ok_rule arity) (idCoreRules bndr)
       , isValidJoinPointType arity (idType bndr)
       = True
       | otherwise
       = False
+
+    ok_rule _ BuiltinRule{} = True
+    ok_rule join_arity (Rule { ru_args = args })
+      = length args == join_arity
 
 willBeJoinId_maybe :: CoreBndr -> Maybe JoinArity
 willBeJoinId_maybe bndr

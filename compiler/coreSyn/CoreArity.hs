@@ -12,7 +12,7 @@
 module CoreArity (
         manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
-        etaExpandToJoinPoint
+        etaExpandToJoinPoint, etaExpandToJoinPointRule
     ) where
 
 #include "HsVersions.h"
@@ -1100,22 +1100,45 @@ etaExpandToJoinPoint join_arity expr
   where
     go 0 rev_bs e         = (reverse rev_bs, e)
     go n rev_bs (Lam b e) = go (n-1) (b : rev_bs) e
-    go n rev_bs e         = case eta n (exprType e) (init_subst e) [] e of
+    go n rev_bs e         = case etaBodyForJoinPoint n e of
                               (bs, e') -> (reverse rev_bs ++ bs, e')
 
-    -- Don't use etaExpand, because that might leave casts in the way. We
-    -- actually need n leading lambdas.
-    eta 0 _  _     rev_bs e
+etaExpandToJoinPointRule :: JoinArity -> CoreRule -> CoreRule
+etaExpandToJoinPointRule _ rule@(BuiltinRule {})
+  = WARN(True, (sep [text "Can't eta-expand built-in rule:", ppr rule]))
+      -- How did a local binding get a built-in rule anyway? Probably a plugin.
+    rule
+etaExpandToJoinPointRule join_arity rule@(Rule { ru_bndrs = bndrs, ru_rhs = rhs
+                                               , ru_args  = args })
+  | need_args == 0
+  = rule
+  | need_args < 0
+  = pprPanic "etaExpandToJoinPointRule" (ppr join_arity $$ ppr rule)
+  | otherwise
+  = rule { ru_bndrs = bndrs ++ new_bndrs, ru_args = args ++ new_args
+         , ru_rhs = new_rhs }
+  where
+    need_args = join_arity - length args
+    (new_bndrs, new_rhs) = etaBodyForJoinPoint need_args rhs
+    new_args = varsToCoreExprs new_bndrs
+
+-- Adds as many binders as asked for; assumes expr is not a lambda
+etaBodyForJoinPoint :: Int -> CoreExpr -> ([CoreBndr], CoreExpr)
+etaBodyForJoinPoint need_args body
+  = go need_args (exprType body) (init_subst body) [] body
+  where
+    go 0 _  _     rev_bs e
       = (reverse rev_bs, e)
-    eta n ty subst rev_bs e
+    go n ty subst rev_bs e
       | Just (tv, res_ty) <- splitForAllTy_maybe ty
       , let (subst', tv') = Type.substTyVarBndr subst tv
-      = eta (n-1) res_ty subst' (tv' : rev_bs) (e `App` Type (mkTyVarTy tv'))
+      = go (n-1) res_ty subst' (tv' : rev_bs) (e `App` Type (mkTyVarTy tv'))
       | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
       , let (subst', b) = freshEtaId n subst arg_ty
-      = eta (n-1) res_ty subst' (b : rev_bs) (e `App` Var b)
+      = go (n-1) res_ty subst' (b : rev_bs) (e `App` Var b)
       | otherwise
-      = pprPanic "splitJoinPoint" (int join_arity <+> ppr expr)
+      = pprPanic "etaBodyForJoinPoint" $ int need_args $$
+                                         ppr body $$ ppr (exprType body)
 
     init_subst e = mkEmptyTCvSubst (mkInScopeSet (exprFreeVars e))
 

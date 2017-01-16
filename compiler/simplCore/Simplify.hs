@@ -3310,9 +3310,7 @@ addBndrRules env in_id out_id
   | null old_rules
   = return (env, out_id)
   | otherwise
-  = do { new_rules <- simplLocalRules env (Just (idName out_id))
-                                          (isJoinId_maybe out_id)
-                                          old_rules
+  = do { new_rules <- simplRules env (Just (idName out_id)) old_rules
        ; let final_id  = out_id `setIdSpecialisation` mkRuleInfo new_rules
        ; return (modifyInScope env final_id, final_id) }
   where
@@ -3320,11 +3318,6 @@ addBndrRules env in_id out_id
 
 simplRules :: SimplEnv -> Maybe Name -> [CoreRule] -> SimplM [CoreRule]
 simplRules env mb_new_nm rules
-  = simplLocalRules env mb_new_nm Nothing rules
-
-simplLocalRules :: SimplEnv -> Maybe Name -> Maybe JoinArity -> [CoreRule]
-                -> SimplM [CoreRule]
-simplLocalRules env mb_new_nm mb_join_arity rules
   = mapM simpl_rule rules
   where
     simpl_rule rule@(BuiltinRule {})
@@ -3334,49 +3327,11 @@ simplLocalRules env mb_new_nm mb_join_arity rules
                           , ru_fn = fn_name, ru_rhs = rhs })
       = do { (env', bndrs') <- simplBinders env bndrs
            ; let rhs_ty = substTy env' (exprType rhs)
-           ; (env'', eta_bndrs, eta_args, rule_cont)
-                <- case mb_join_arity of
-                     Just join_arity -> etaExpandRule env' join_arity rhs_ty
-                                                      args
-                     Nothing         -> return (env', [], [],
-                                                mkBoringStop rhs_ty)
-           ; let rule_env = updMode updModeForRules env''
+                 rule_cont = mkBoringStop rhs_ty
+                 rule_env  = updMode updModeForRules env'
            ; args' <- mapM (simplExpr rule_env) args
            ; rhs'  <- simplExprC rule_env rhs rule_cont
-           ; return (rule { ru_bndrs = bndrs' ++ eta_bndrs
+           ; return (rule { ru_bndrs = bndrs'
                           , ru_fn    = mb_new_nm `orElse` fn_name
-                          , ru_args  = args' ++ eta_args
+                          , ru_args  = args'
                           , ru_rhs   = rhs' }) }
-
-etaExpandRule :: SimplEnv
-              -> JoinArity -- Number of arguments needed
-              -> OutType   -- Type of rule RHS
-              -> [InExpr]  -- Existing arguments in rule LHS
-              -> SimplM (SimplEnv,  -- Environment with new binders in it
-                         [OutBndr], -- New binders for eta-expanded rule
-                         [OutExpr], -- New arguments for eta-expanded rule
-                         SimplCont) -- Continuation which adds new arguments
-etaExpandRule env join_arity rhs_ty args
-  = go env (join_arity - length args) rhs_ty
-  where
-    go env n ty
-      | n <= 0
-      = return (env, [], [], mkBoringStop ty)
-      | Just (ty_bndr, res_ty) <- splitPiTy_maybe ty
-      = do { (env', eta_var) <- ty_bndr_to_new_var env ty_bndr
-           ; (env'', bndrs, args, cont) <- go env' (n-1) res_ty
-           ; let eta_arg = varToCoreExpr eta_var
-                 cont'   = ApplyToVal { sc_dup  = OkToDup
-                                      , sc_arg  = eta_arg
-                                      , sc_env  = zapSubstEnv env''
-                                      , sc_cont = cont }
-           ; return (env'', eta_var : bndrs, eta_arg : args, cont') }
-      | otherwise
-      = pprPanic "etaExpandRule" $
-          ppr join_arity <+> ppr (length args) $$ ppr rhs_ty
-
-    ty_bndr_to_new_var env ty_bndr
-      = caseBinder ty_bndr
-          (\tvb    -> simplBinder env (binderVar tvb))
-          (\arg_ty -> do { var <- newId (fsLit "eta") arg_ty
-                         ; return (modifyInScope env var, var) })

@@ -23,6 +23,7 @@ import CoreSyn
 import Rules
 import CoreUtils        ( exprIsTrivial, applyTypeToArgs, mkCast )
 import CoreFVs          ( exprFreeVars, exprsFreeVars, idFreeVars, exprsFreeIdsList )
+import CoreArity        ( etaExpandToJoinPointRule )
 import UniqSupply
 import Name
 import MkId             ( voidArgId, voidPrimId )
@@ -1298,7 +1299,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                             -- otherwise uniques end up there, making builds
                             -- less deterministic (See #4012 comment:61 ff)
 
-                spec_env_rule = mkRule
+                rule_wout_eta = mkRule
                                   this_mod
                                   True {- Auto generated -}
                                   is_local
@@ -1308,6 +1309,12 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                                   rule_bndrs
                                   rule_args
                                   (mkVarApps (Var spec_f) app_args)
+
+                spec_env_rule
+                  = case isJoinId_maybe fn of
+                      Just join_arity -> etaExpandToJoinPointRule join_arity
+                                                                  rule_wout_eta
+                      Nothing -> rule_wout_eta
 
                 -- Add the { d1' = dx1; d2' = dx2 } usage stuff
                 final_uds = foldr consDictBind rhs_uds dx_binds
