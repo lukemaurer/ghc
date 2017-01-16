@@ -755,7 +755,8 @@ completeBind env top_lvl is_rec mb_cont old_bndr new_bndr new_rhs
         -- Do eta-expansion on the RHS of the binding
         -- See Note [Eta-expanding at let bindings] in SimplUtils
       ; (new_arity, final_rhs) <- if isJoinId new_bndr
-                                    then return (exprArity new_rhs, new_rhs)
+                                    then return (arity_of_join new_bndr new_rhs,
+                                                 new_rhs)
                                          -- Note [Don't eta-expand join points]
                                     else tryEtaExpandRhs env is_rec
                                                          new_bndr new_rhs
@@ -796,6 +797,10 @@ completeBind env top_lvl is_rec mb_cont old_bndr new_bndr new_rhs
       ; -- pprTrace "Binding" (ppr final_id <+> ppr new_unfolding) $
         return (addNonRec env final_id final_rhs) } }
                 -- The addNonRec adds it to the in-scope set too
+ where
+   arity_of_join bndr rhs
+     = count isId $ take (idJoinArity bndr) $ fst $ collectBinders rhs
+         -- How many of the first n binders bind values?
 
 ------------------------------
 addPolyBind :: TopLevelFlag -> SimplEnv -> OutBind -> SimplM SimplEnv
