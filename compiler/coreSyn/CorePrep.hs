@@ -204,9 +204,10 @@ corePrepTopBinds initialCorePrepEnv binds
   = go initialCorePrepEnv binds
   where
     go _   []             = return emptyFloats
-    go env (bind : binds) = do (env', bind', maybe_wrap)
+    go env (bind : binds) = do (env', bind', maybe_wrap_w_joins)
                                  <- cpeBind TopLevel env bind
-                               MASSERT(isNothing maybe_wrap)
+                               MASSERT(isNothing maybe_wrap_w_joins)
+                                 -- No join point should float to top
                                binds' <- go env' binds
                                return (bind' `appendFloats` binds')
 
@@ -371,7 +372,9 @@ Into this one:
 -}
 
 cpeBind :: TopLevelFlag -> CorePrepEnv -> CoreBind
-        -> UniqSM (CorePrepEnv, Floats, Maybe (CoreExpr -> CoreExpr))
+        -> UniqSM (CorePrepEnv,
+                   Floats,                       -- Floating value bindings
+                   Maybe (CoreExpr -> CoreExpr)) -- Floating join points
 cpeBind top_lvl env (NonRec bndr rhs)
   | not (isJoinId bndr)
   = do { (_, bndr1) <- cpCloneBndr env bndr
@@ -394,7 +397,7 @@ cpeBind top_lvl env (NonRec bndr rhs)
                  addFloat floats new_float,
                  Nothing) }}
   | otherwise
-  = ASSERT(not (isTopLevel top_lvl))
+  = ASSERT(not (isTopLevel top_lvl)) -- can't have top-level join point
     do { (_, bndr1) <- cpCloneBndr env bndr
        ; (bndr2, rhs1) <- cpeJoinPair env bndr1 rhs
        ; return (extendCorePrepEnv env bndr bndr2,
@@ -435,7 +438,7 @@ cpePair :: TopLevelFlag -> RecFlag -> Demand -> Bool
         -> UniqSM (Floats, Id, CpeRhs)
 -- Used for all bindings
 cpePair top_lvl is_rec dmd is_unlifted env bndr rhs
-  = ASSERT(not (isJoinId bndr))
+  = ASSERT(not (isJoinId bndr)) -- those should use cpeJoinPair
     do { (floats1, rhs1) <- cpeRhsE env rhs
 
        -- See if we are allowed to float this stuff out of the RHS

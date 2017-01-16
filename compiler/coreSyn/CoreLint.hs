@@ -1900,8 +1900,7 @@ addInScopeVars vars m
                    , le_bad_joins = bad_joins' env })
               errs
   where
-    bad_joins' env = delVarSetList (le_bad_joins env)
-                                   (filter (\v -> isId v && isJoinId v) vars)
+    bad_joins' env = delVarSetList (le_bad_joins env) (filter isJoinId vars)
 
 addInScopeVarSet :: VarSet -> LintM a -> LintM a
 addInScopeVarSet vars m
@@ -1915,8 +1914,8 @@ addInScopeVar var m
     unLintM m (env { le_subst     = extendTCvInScope (le_subst env) var
                    , le_bad_joins = bad_joins' env }) errs
   where
-    bad_joins' env | isId var && isJoinId var = delVarSet (le_bad_joins env) var
-                   | otherwise                = le_bad_joins env
+    bad_joins' env | isJoinId var = delVarSet (le_bad_joins env) var
+                   | otherwise    = le_bad_joins env
 
 extendSubstL :: TyVar -> Type -> LintM a -> LintM a
 extendSubstL tv ty m
@@ -1931,9 +1930,8 @@ markAllJoinsBad :: LintM a -> LintM a
 markAllJoinsBad m
   = LintM $ \ env errs -> unLintM m (marked env) errs
   where
-    marked env = env { le_bad_joins = filterVarSet is_join in_set }
+    marked env = env { le_bad_joins = filterVarSet isJoinId in_set }
       where
-        is_join bndr = isId bndr && isJoinId bndr
         in_set = getInScopeVars (getTCvInScope (le_subst env))
 
 markAllJoinsBadIf :: Bool -> LintM a -> LintM a

@@ -40,6 +40,8 @@ module CoreSubst (
 #include "HsVersions.h"
 
 import {-# SOURCE #-} CoreArity ( etaExpandToJoinPoint )
+                        -- Needed for simpleOptPgm to convert bindings to join
+                        -- points, but CoreArity uses substitutions throughout
 
 import CoreSyn
 import CoreFVs
@@ -1005,17 +1007,26 @@ simple_app subst (Var v) as
   -- See Note [Unfold compulsory unfoldings in LHSs]
   =  simple_app subst (unfoldingTemplate (idUnfolding v)) as
   | e@(Lam {}) <- lookupIdSubst (text "simple_app") subst v
-  = let (bndrs, body) = collectBinders e
-        (pairs, extra_bndrs, extra_args) = zip_rem bndrs as
+  = -- Beta-reduce as far as possible. Can't hold back, since it could be
+    -- a join point we're substituting, and its body could have jumps, so we
+    -- can't leave a lambda lying around.
+    let (bndrs, body) = collectBinders e
+        (pairs, extra_bndrs, extra_args) = mk_pairs bndrs as
         body' = foldr Lam body extra_bndrs
         expr = mkParallelBindings (substInScope subst) pairs body'
+                 -- Returns let pairs in body', carefully alpha-renaming so the
+                 -- pairs don't capture each other
     in
     foldl App expr extra_args
   where
-    zip_rem xs [] = ([], xs, [])
-    zip_rem [] ys = ([], [], ys)
-    zip_rem (x:xs) (y:ys) = ((x, y) : xys, xs', ys')
-      where (xys, xs', ys') = zip_rem xs ys
+    mk_pairs :: [CoreBndr] -> [CoreExpr]
+             -> ([(CoreBndr, CoreExpr)], -- Matched pairs
+                 [CoreBndr],             -- Leftover binders (if not enuf args)
+                 [CoreExpr])             -- Leftover args (if not enuf bndrs)
+    mk_pairs bs [] = ([], bs, [])
+    mk_pairs [] es = ([], [], es)
+    mk_pairs (b:bs) (e:es) = ((b, e) : pairs, bs', es')
+      where (pairs, bs', es') = mk_pairs bs es
 simple_app subst (Tick t e) as
   -- Okay to do "(Tick t e) x ==> Tick t (e x)"?
   | t `tickishScopesLike` SoftScope

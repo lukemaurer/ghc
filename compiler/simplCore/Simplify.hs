@@ -470,7 +470,7 @@ completeNonRecX :: TopLevelFlag -> SimplEnv
 --               See Note [CoreSyn let/app invariant] in CoreSyn
 
 completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
-  = ASSERT(not (isId new_bndr && isJoinId new_bndr))
+  = ASSERT(not (isJoinId new_bndr))
     do  { (env1, rhs1) <- prepareRhs top_lvl (zapFloats env) new_bndr new_rhs
         ; (env2, rhs2) <-
                 if doFloatFromRhs NotTopLevel NonRecursive is_strict rhs1 env1

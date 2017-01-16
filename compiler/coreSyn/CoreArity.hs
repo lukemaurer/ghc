@@ -911,8 +911,8 @@ instance Outputable EtaInfo where
 
 pushCoercion :: Coercion -> [EtaInfo] -> [EtaInfo]
 pushCoercion co1 (EtaCo co2 : eis)
-  | isReflexiveCo co = eis
-  | otherwise        = EtaCo co : eis
+  | isReflCo co = eis
+  | otherwise   = EtaCo co : eis
   where
     co = co1 `mkTransCo` co2
 
@@ -1008,9 +1008,9 @@ etaInfoAppRhs subst bndr expr eis
 -- applied to its RHS, so its type may change. See Note [No crap in
 -- eta-expanded code] for why all this is necessary.
 etaInfoAppLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
-etaInfoAppLocalBndr bndr eis
+etaInfoAppLocalBndr bndr orig_eis
   = case isJoinId_maybe bndr of
-      Just arity -> bndr `setIdType` modifyJoinResTy arity (app eis) ty
+      Just arity -> bndr `setIdType` modifyJoinResTy arity (app orig_eis) ty
       Nothing    -> bndr
   where
     ty = idType bndr
@@ -1025,7 +1025,9 @@ etaInfoAppLocalBndr bndr eis
       | isId v    = app eis (funResultTy ty)
       | otherwise = app eis (piResultTy ty (mkTyVarTy v))
     app (EtaCo co : eis) ty
-      = ASSERT(from_ty `eqType` ty)
+      = ASSERT2(from_ty `eqType` ty, fsep ([text "can't apply", ppr orig_eis,
+                                            text "to", ppr bndr <+> dcolon <+>
+                                                       ppr (idType bndr)]))
         app eis to_ty
       where
         Pair from_ty to_ty = coercionKind co

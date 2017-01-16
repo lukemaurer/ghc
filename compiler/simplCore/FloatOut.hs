@@ -167,6 +167,7 @@ floatBind :: LevelledBind -> (FloatStats, FloatBinds, [CoreBind])
   --     * One or both of:
   --       * A recursive group of join binds
   --       * A recursive group of value binds
+  -- See Note [Floating out of Rec rhss] for why things get arranged this way.
 floatBind (NonRec (TB var _) rhs)
   = case (floatRhs var rhs) of { (fs, rhs_floats, rhs') ->
 

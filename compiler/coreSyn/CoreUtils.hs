@@ -2246,4 +2246,4 @@ collectStaticPtrSatArgs _
 isJoinBind :: CoreBind -> Bool
 isJoinBind (NonRec b _)       = isJoinId b
 isJoinBind (Rec ((b, _) : _)) = isJoinId b
-isJoinBind _                  = panic "isJoinBind"
+isJoinBind _                  = False

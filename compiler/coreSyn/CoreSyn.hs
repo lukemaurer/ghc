@@ -78,7 +78,7 @@ module CoreSyn (
         collectAnnArgs, collectAnnArgsTicks,
 
         -- ** Operations on annotations
-        deAnnotate, deAnnotate', deAnnotateBind, deAnnAlt,
+        deAnnotate, deAnnotate', deAnnAlt,
         collectAnnBndrs, collectNAnnBndrs,
 
         -- * Orphanhood
@@ -515,7 +515,7 @@ For more details, see the paper:
 
 Note [Invariants on join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In order to be a join point, a binder must follow these invariants:
+Join points must follow these invariants:
 
   1. All occurrences must be tail calls. Each of these tail calls must pass the
      same number of arguments, counting both types and values; we call this the
@@ -525,14 +525,15 @@ In order to be a join point, a binder must follow these invariants:
        a. For a join arity n, the right-hand side must begin with exactly n
           lambdas.
        b. All other bindings in the recursive group must also be join points.
-  4. The binding's type must not be polymorphic in its return type. See
-     'Type.isValidJoinPointType'.
+  4. The binding's type must not be polymorphic in its return type.
 
 Strictly speaking, invariant 2 is redundant, since the rigorous definition of
 "tail call" circumscribes the contexts in which a tail call may appear; the
 right-hand side of a non-join-point definition is not such a context, and
 neither would be the RHS of a join point with extra lambdas. See Section 3 of
 the paper (Note [Join points]).
+
+Invariant 4 is subtle; see Note [The polymorphism rule of join points].
 
 Core Lint will check these invariants, anticipating that any binder whose
 OccInfo is marked AlwaysTailCalled will become a join point as soon as the
@@ -593,6 +594,42 @@ Now we can move the case inward and we only have to change the jump:
 
 (Core Lint would still check that the body of the join point has the right type;
 that type would simply not be reflected in the join id.)
+
+Note [The polymorphism rule of join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Invariant 4 of Note [Invariants on join points] forbids a join point to be
+polymorphic in its return type. That is, if its type is
+
+  forall a1 ... ak. t1 -> ... -> tn -> r
+
+where its join arity is k+n, none of the type parameters ai may occur free in r.
+The most direct explanation is that given
+
+  join j @a1 ... @ak x1 ... xn = e1 in e2
+
+our typing rules require `e1` and `e2` to have the same type. Therefore the type
+of `e1`---the return type of the join point---must be the same as the type of
+e2. Since the type variables aren't bound in `e2`, its type can't include them,
+and thus neither can the type of `e1`.
+
+There's a deeper explanation in terms of the sequent calculus in Section 5.3 of
+a previous paper:
+
+  Paul Downen, Luke Maurer, Zena Ariola, and Simon Peyton Jones. "Sequent
+  calculus as a compiler intermediate language." ICFP'16.
+
+  https://www.microsoft.com/en-us/research/wp-content/uploads/2016/04/sequent-calculus-icfp16.pdf
+
+The quick version: Consider the CPS term (the paper uses the sequent calculus,
+but we can translate readily):
+
+  \k -> join j @a1 ... @ak x1 ... xn = e1 k in e2 k
+
+Since `j` is a join point, it doesn't bind a continuation variable but reuses
+the variable `k` from the context. But the parameters `ai` are not in `k`'s
+scope, and `k`'s type determines the return type of `j`; thus the `ai`s don't
+appear in the return type of `j`. (Also, since `e1` and `e2` are passed the same
+continuation, they must have the same type; hence the direct explanation above.)
 
 ************************************************************************
 *                                                                      *
@@ -1981,10 +2018,6 @@ collectAnnArgsTicks tickishOk expr
 deAnnotate :: AnnExpr bndr annot -> Expr bndr
 deAnnotate (_, e) = deAnnotate' e
 
-deAnnotateBind :: AnnBind bndr annot -> Bind bndr
-deAnnotateBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
-deAnnotateBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
-
 deAnnotate' :: AnnExpr' bndr annot -> Expr bndr
 deAnnotate' (AnnType t)           = Type t
 deAnnotate' (AnnCoercion co)      = Coercion co
@@ -1996,7 +2029,10 @@ deAnnotate' (AnnCast e (_,co))    = Cast (deAnnotate e) co
 deAnnotate' (AnnTick tick body)   = Tick tick (deAnnotate body)
 
 deAnnotate' (AnnLet bind body)
-  = Let (deAnnotateBind bind) (deAnnotate body)
+  = Let (deAnnBind bind) (deAnnotate body)
+  where
+    deAnnBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
+    deAnnBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
 
 deAnnotate' (AnnCase scrut v t alts)
   = Case (deAnnotate scrut) v t (map deAnnAlt alts)

@@ -657,7 +657,7 @@ unpackTrivial _                       = Nothing
 -- This is the case when there are manifest value lambdas or the binding is a
 -- join point (hence always acts like a function, not a value).
 useLetUp :: Var -> CoreExpr -> Bool
-useLetUp f _ | isId f, isJoinId f = False
+useLetUp f _         | isJoinId f = False
 useLetUp f (Lam v e) | isTyVar v  = useLetUp f e
 useLetUp _ (Lam _ _)              = False
 useLetUp _ _                      = True

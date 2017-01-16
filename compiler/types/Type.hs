@@ -1936,10 +1936,12 @@ isPrimitiveType ty = case splitTyConApp_maybe ty of
 -}
 
 -- | Determine whether a type could be the type of a join point of given total
--- arity. A join point cannot be polymorphic in its return type, since given
---   let <join> j @a @b x y z = e1 in e2,
+-- arity, according to the polymorphism rule. A join point cannot be polymorphic
+-- in its return type, since given
+--   join j @a @b x y z = e1 in e2,
 -- the types of e1 and e2 must be the same, and a and b are not in scope for e2.
--- Returns False if the type simply doesn't have enough arguments.
+-- (See Note [The polymorphism rule of join points] in CoreSyn.) Returns False
+-- also if the type simply doesn't have enough arguments.
 --
 -- Note that we need to know how many arguments (type *and* value) the putative
 -- join point takes; for instance, if
@@ -1967,10 +1969,10 @@ Note [Excess polymorphism and join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In principle, if a function would be a join point except that it fails
-this test, it can still be made a join point with some effort. This is
-because all tail calls must return the same type (they return to the same
-context!), and thus if the return type depends on an argument, that argument
-must always be the same. So, for instance, given:
+the polymorphism rule (see 'isValidJoinPointType'), it can still be made a join
+point with some effort. This is because all tail calls must return the same type
+(they return to the same context!), and thus if the return type depends on an
+argument, that argument must always be the same. So, for instance, given:
 
   let f :: forall a. a -> Char -> [a]
       f x = ... f @a x 'a' ...

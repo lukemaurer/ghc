@@ -434,7 +434,7 @@ emptyJoinFloats = nilOL
 
 unitFloat :: OutBind -> Floats
 -- This key function constructs a singleton float with the right form
-unitFloat bind = ASSERT(all (\v -> not (isId v && isJoinId v)) (bindersOf bind))
+unitFloat bind = ASSERT(all (not . isJoinId) (bindersOf bind))
                  Floats (unitOL bind) (flag bind)
   where
     flag (Rec {})                = FltLifted
@@ -446,7 +446,7 @@ unitFloat bind = ASSERT(all (\v -> not (isId v && isJoinId v)) (bindersOf bind))
       -- Unlifted binders can only be let-bound if exprOkForSpeculation holds
 
 unitJoinFloat :: OutBind -> JoinFloats
-unitJoinFloat bind = ASSERT(all (\v -> isId v && isJoinId v) (bindersOf bind))
+unitJoinFloat bind = ASSERT(all isJoinId (bindersOf bind))
                      unitOL bind
 
 addNonRec :: SimplEnv -> OutId -> OutExpr -> SimplEnv
@@ -662,7 +662,7 @@ simplNonRecJoinBndr env res_ty id
 simplRecBndrs :: SimplEnv -> [InBndr] -> SimplM SimplEnv
 -- Recursive let binders
 simplRecBndrs env@(SimplEnv {}) ids
-  = ASSERT(all (\v -> not (isId v && isJoinId v)) ids)
+  = ASSERT(all (not . isJoinId) ids)
     do  { let (env1, ids1) = mapAccumL (substIdBndr Nothing) env ids
         ; seqIds ids1 `seq` return env1 }
 
@@ -671,7 +671,7 @@ simplRecJoinBndrs :: SimplEnv -> OutType -> [InBndr] -> SimplM SimplEnv
 -- Recursive let binders for join points; context being pushed inward may
 -- change types
 simplRecJoinBndrs env@(SimplEnv {}) res_ty ids
-  = ASSERT(all (\v -> isId v && isJoinId v) ids)
+  = ASSERT(all isJoinId ids)
     do  { let (env1, ids1) = mapAccumL (substIdBndr (Just res_ty)) env ids
         ; seqIds ids1 `seq` return env1 }
 
