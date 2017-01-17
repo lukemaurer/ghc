@@ -427,7 +427,6 @@ simplJoinBind :: SimplEnv
                                         --   unfolding
               -> InExpr -> SimplEnv     -- The RHS and its environment
               -> SimplM SimplEnv
--- Precondition: rhs obeys the let/app invariant
 simplJoinBind env is_rec cont bndr bndr1 rhs rhs_se
   = -- pprTrace "simplLazyBind" ((ppr bndr <+> ppr bndr1) $$
     --                           ppr rhs $$ ppr (seIdSubst rhs_se)) $
@@ -855,18 +854,6 @@ which is in the output of Specialise:
 Here opInt has arity 1; but when we apply the rule its arity drops to 0.
 That's why Specialise goes to a little trouble to pin the right arity
 on specialised functions too.
-
-Also, the arity of a join point can decrease:
-
-  (let <join> j x = \y -> x + y in if b then j 1 else j 2) 3
-
-  ==>
-
-  let <join> j x = (\y -> x + y) 3 in if b then j 1 else j 2
-
-  ==>
-
-  let <join> j x = x + 3 in if b then j 1 else j 2
 
 Note [Setting the demand info]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -133,8 +133,7 @@ data SimplCont
   -- The two strict forms have no DupFlag, because we never duplicate them
   | StrictBind                  -- (\x* \xs. e) <hole>
         InId [InBndr]           -- let x* = <hole> in e
-        InExpr                  --      is a special case
-        SimplEnv                -- Note [Join floats in StrictBind]
+        InExpr StaticEnv        --      is a special case
         SimplCont
 
   | StrictArg           -- f e1 ..en <hole>
@@ -170,30 +169,6 @@ the following invariants hold
   (a) if dup = OkToDup, then continuation k is also ok-to-dup
   (b) if dup = OkToDup or Simplified, the subst-env is empty
       (and and hence no need to re-simplify)
-
-Note [Join floats and StrictBind]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The environment in a StrictBind has floats for join points but *not* for values.
-This is because floating joins are fundamentally associated with their
-continuations, whereas floating values go outside of them.
-
-We might view the Simplifier's view of the program like this:
-
-  Fv[E[Fj[e]]]
-
-Here, Fv is the context containing the value floats in the environment, E is the
-continuation, Fj is the context with the join floats, and e is the expression
-being considered. While the value floats rise above the strict context, the join
-floats *must* remain inside it. (Seen as continuations, the floating joins have
-free occurrences of the continuation variable binding E.) Thus, a StrictBind
-should be seen as denoting
-
-  Fj[let x* = [] in e1],
-
-so that while we work on the RHS, the join floats are kept separate. Any value
-floats in the RHS should join Fv on the outside, but any join floats need to
-wrap the RHS. We then restore the join floats in Fj when working on e1.
 -}
 
 instance Outputable DupFlag where

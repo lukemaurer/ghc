@@ -692,10 +692,43 @@ costs us anything when, for some `j`:
   * Before specialisation, `j` has non-tail calls, so it can't be a join point.
   * During specialisation, `j` gets specialised and thus acquires rules.
   * Sometime afterward, the non-tail calls to `j` disappear (as dead code, say),
-    and so now `t2` *could* become a join point.
+    and so now `j` *could* become a join point.
 
-This happens, but rarely. And in the non-recursive case, we can still make `j`
-a join point, just not its specialised version.
+This appears to be very rare in practice. TODO Perhaps we should gather
+statistics to be sure.
+
+Note [Excess polymorphism and join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In principle, if a function would be a join point except that it fails
+the polymorphism rule (see Note [The polymorphism rule of join points] in
+CoreSyn), it can still be made a join point with some effort. This is because
+all tail calls must return the same type (they return to the same context!), and
+thus if the return type depends on an argument, that argument must always be the
+same.
+
+For instance, consider:
+
+  let f :: forall a. a -> Char -> [a]
+      f @a x c = ... f @a x 'a' ...
+  in ... f @Int 1 'b' ... f @Int 2 'c' ...
+
+(where the calls are tail calls). `f` fails the polymorphism rule because its
+return type is [a], where [a] is bound. But since the type argument is always
+'Int', we can rewrite it as:
+
+  let f' :: Int -> Char -> [Int]
+      f' x c = ... f' x 'a' ...
+  in ... f' 1 'b' ... f 2 'c' ...
+
+and now we can make f' a join point:
+
+  join f' :: Int -> Char -> [Int]
+       f' x c = ... jump f' x 'a' ...
+  in ... jump f' 1 'b' ... jump f' 2 'c' ...
+
+It's not clear that this comes up often, however. TODO: Measure how often and
+add this analysis if necessary.
 
 ------------------------------------------------------------
 Note [Adjusting for lambdas]
@@ -2325,32 +2358,15 @@ instance Outputable UsageDetails where
 -------------------
 -- UsageDetails API
 
-(+++)          :: UsageDetails -> UsageDetails -> UsageDetails
-combineUsageDetailsList :: [UsageDetails] -> UsageDetails
-combineAltsUsageDetails :: UsageDetails -> UsageDetails -> UsageDetails
-mkOneOcc       :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
-addOneOcc      :: UsageDetails -> Id -> OccInfo -> UsageDetails
--- Add several occurrences, assumed not to be tail calls
-addManyOccs    :: Var -> UsageDetails -> UsageDetails
-addManyOccsSet :: UsageDetails -> VarSet -> UsageDetails
-delDetails     :: UsageDetails -> Id -> UsageDetails
-delDetailsList :: UsageDetails -> [Id] -> UsageDetails
-minusDetails   :: UsageDetails -> IdEnv a -> UsageDetails
-emptyDetails   :: UsageDetails
-isEmptyDetails :: UsageDetails -> Bool
-zapDetails     :: UsageDetails -> UsageDetails
-markAllMany    :: UsageDetails -> UsageDetails
-markAllInsideLam     :: UsageDetails -> UsageDetails
-markAllNonTailCalled :: UsageDetails -> UsageDetails
-lookupDetails  :: UsageDetails -> Id -> OccInfo
-usedIn         :: Id -> UsageDetails -> Bool
-udFreeVars     :: VarSet -> UsageDetails -> VarSet
-
--------------------
+(+++), combineAltsUsageDetails
+        :: UsageDetails -> UsageDetails -> UsageDetails
 (+++) = combineUsageDetailsWith addOccInfo
-combineUsageDetailsList = foldl (+++) emptyDetails
 combineAltsUsageDetails = combineUsageDetailsWith orOccInfo
 
+combineUsageDetailsList :: [UsageDetails] -> UsageDetails
+combineUsageDetailsList = foldl (+++) emptyDetails
+
+mkOneOcc :: OccEnv -> Id -> InterestingCxt -> JoinArity -> UsageDetails
 mkOneOcc env id int_cxt arity
   | isLocalId id
   = singleton $ OneOcc { occ_in_lam  = False
@@ -2365,15 +2381,19 @@ mkOneOcc env id int_cxt arity
   where
     singleton info = emptyDetails { ud_env = unitVarEnv id info }
 
+addOneOcc :: UsageDetails -> Id -> OccInfo -> UsageDetails
 addOneOcc ud id info
   = ud { ud_env = extendVarEnv_C plus_zapped (ud_env ud) id info }
       `alterZappedSets` (`delVarEnv` id)
   where
     plus_zapped old new = doZapping ud id old `addOccInfo` new
 
+addManyOccsSet :: UsageDetails -> VarSet -> UsageDetails
 addManyOccsSet usage id_set = nonDetFoldUFM addManyOccs usage id_set
   -- It's OK to use nonDetFoldUFM here because addManyOccs commutes
 
+-- Add several occurrences, assumed not to be tail calls
+addManyOccs :: Var -> UsageDetails -> UsageDetails
 addManyOccs v u | isId v    = addOneOcc u v noOccInfo
                 | otherwise = u
         -- Give a non-committal binder info (i.e noOccInfo) because
@@ -2382,36 +2402,45 @@ addManyOccs v u | isId v    = addOneOcc u v noOccInfo
         --      even if that's the only occurrence of the thing
         --      (Same goes for INLINE.)
 
-
+delDetails :: UsageDetails -> Id -> UsageDetails
 delDetails ud bndr
   = ud `alterUsageDetails` (`delVarEnv` bndr)
 
+delDetailsList :: UsageDetails -> [Id] -> UsageDetails
 delDetailsList ud bndrs
   = ud `alterUsageDetails` (`delVarEnvList` bndrs)
 
+minusDetails :: UsageDetails -> IdEnv a -> UsageDetails
 minusDetails ud bndrs
   = ud `alterUsageDetails` (`minusVarEnv` bndrs)
 
+emptyDetails :: UsageDetails
 emptyDetails = UD { ud_env       = emptyVarEnv
                   , ud_z_many    = emptyVarEnv
                   , ud_z_in_lam  = emptyVarEnv
                   , ud_z_no_tail = emptyVarEnv }
 
+isEmptyDetails :: UsageDetails -> Bool
 isEmptyDetails = isEmptyVarEnv . ud_env
 
+markAllMany, markAllInsideLam, markAllNonTailCalled, zapDetails
+  :: UsageDetails -> UsageDetails
 markAllMany          ud = ud { ud_z_many    = ud_env ud }
 markAllInsideLam     ud = ud { ud_z_in_lam  = ud_env ud }
 markAllNonTailCalled ud = ud { ud_z_no_tail = ud_env ud }
 
 zapDetails = markAllMany . markAllNonTailCalled -- effectively sets to noOccInfo
 
+lookupDetails :: UsageDetails -> Id -> OccInfo
 lookupDetails ud id
   = case lookupVarEnv (ud_env ud) id of
       Just occ -> doZapping ud id occ
       Nothing  -> IAmDead
 
+usedIn :: Id -> UsageDetails -> Bool
 v `usedIn` ud = isExportedId v || v `elemVarEnv` ud_env ud
 
+udFreeVars :: VarSet -> UsageDetails -> VarSet
 -- Find the subset of bndrs that are mentioned in uds
 udFreeVars bndrs ud = intersectUFM_C (\b _ -> b) bndrs (ud_env ud)
 

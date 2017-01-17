@@ -233,6 +233,10 @@ mkCoreLams = mkLams
 --    let x  = x1 in
 --    let y  = y1 in ...
 -- The extra bindings will be cleaned up by the simplifier.
+--
+-- Often, this could be accomplished by a beta redex:
+--    (\x y z -> ...) 3 x y
+-- But this is ill-typed if the ... contains a jump to a free join id.
 mkParallelBindings :: InScopeSet
                    -> [(CoreBndr, CoreExpr)] -> CoreExpr -> CoreExpr
 mkParallelBindings _ [] body

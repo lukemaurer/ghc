@@ -11,8 +11,7 @@ module CoreSyn (
         Expr(..), Alt, Bind(..), AltCon(..), Arg,
         Tickish(..), TickishScoping(..), TickishPlacement(..),
         CoreProgram, CoreExpr, CoreAlt, CoreBind, CoreArg, CoreBndr,
-        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..),
-        deTagExpr, deTagBind,
+        TaggedExpr, TaggedAlt, TaggedBind, TaggedArg, TaggedBndr(..), deTagExpr,
 
         -- * In/Out type synonyms
         InId, InBind, InExpr, InAlt, InArg, InType, InKind,
@@ -484,10 +483,12 @@ We write a join-point declaration as
 like a let binding but with "join" instead (or "join rec" for "let rec"). Note
 that we put the parameters before the = rather than using lambdas; this is
 because it's relevant how many parameters the join point takes *as a join
-point.* Note that a join point may return a lambda! So
+point.* This number is called the *join arity,* distinct from arity because it
+counts types as well as values. Note that a join point may return a lambda! So
   join j x = x + 1
 is different from
   join j = \x -> x + 1
+The former has join arity 1, while the latter has join arity 0.
 
 The identifier for a join point is called a join id or a *label.* An invocation
 is called a *jump.* We write a jump using the jump keyword:

@@ -896,8 +896,7 @@ simpleOptExpr expr
         -- three passes instead of two (occ-anal, and go)
 
 simpleOptExprWith :: Subst -> InExpr -> OutExpr
-simpleOptExprWith subst expr
-  = simple_opt_expr subst (occurAnalyseExpr expr)
+simpleOptExprWith subst expr = simple_opt_expr subst (occurAnalyseExpr expr)
 
 ----------------------
 simpleOptPgm :: DynFlags -> Module
@@ -1051,8 +1050,10 @@ simple_opt_bind' subst (Rec prs)
            Nothing     -> (subst,  (b2,r2):prs)
        where
          (b1, r1) | AlwaysTailCalled ar <- tailCallInfo (idOccInfo b')
+                    -- Marked to become a join point
                   , (bndrs, body) <- etaExpandToJoinPoint ar r
-                  = (maybeModifyIdInfo (zapTailCallInfo (idInfo b')) $
+                  = -- Tail call info now unnecessary
+                    (maybeModifyIdInfo (zapTailCallInfo (idInfo b')) $
                        b' `asJoinId` ar,
                      mkLams bndrs body)
                   | otherwise
