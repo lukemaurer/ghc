@@ -21,7 +21,7 @@ module FloatIn ( floatInwards ) where
 import CoreSyn
 import MkCore
 import CoreUtils        ( exprIsDupable, exprIsExpandable,
-                          exprOkForSideEffects, mkTicks, isJoinBind )
+                          exprOkForSideEffects, mkTicks )
 import CoreFVs
 import Id               ( isJoinId, isJoinId_maybe, isOneShotBndr, idType )
 import Var
@@ -145,7 +145,7 @@ fiExpr dflags to_drop (_, AnnCast expr (co_ann, co))
     Cast (fiExpr dflags e_drop expr) co
   where
     [drop_here, e_drop, co_drop]
-      = sepBindsByDropPoint dflags False False
+      = sepBindsByDropPoint dflags False
           [freeVarsOf expr, freeVarsOfAnn co_ann]
           (freeVarsOfType expr `unionDVarSet` freeVarsOfTypeAnn co_ann)
           to_drop
@@ -176,7 +176,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
       = (extra_fvs, freeVarsOf ann_arg)
 
     drop_here : extra_drop : fun_drop : arg_drops
-      = sepBindsByDropPoint dflags False True -- Note [Join points]
+      = sepBindsByDropPoint dflags False
           (extra_fvs : fun_fvs : arg_fvs)
           (freeVarsOfType ann_fun `unionDVarSet`
            mapUnionDVarSet freeVarsOfType ann_args)
@@ -329,7 +329,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
     is_rec  = NonRecursive
 
     [shared_binds, extra_binds, rhs_binds, body_binds]
-        = sepBindsByDropPoint dflags False False
+        = sepBindsByDropPoint dflags False
             [extra_fvs, rhs_fvs, body_fvs]
             (freeVarsOfType rhs `unionDVarSet` freeVarsOfType body)
             to_drop
@@ -359,7 +359,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnRec bindings) body)
                               , noFloatIntoRhs (isJoinId bndr) Recursive rhs ]
 
     (shared_binds:extra_binds:body_binds:rhss_binds)
-        = sepBindsByDropPoint dflags False False
+        = sepBindsByDropPoint dflags False
             (extra_fvs:body_fvs:rhss_fvs)
             (freeVarsOfType body `unionDVarSet` mapUnionDVarSet freeVarsOfType rhss)
             to_drop
@@ -409,7 +409,7 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr _ [(con,alt_bndrs,rhs)])
                     (FloatCase scrut' case_bndr con alt_bndrs)
     scrut' = fiExpr dflags scrut_binds scrut
     [shared_binds, scrut_binds, rhs_binds]
-       = sepBindsByDropPoint dflags False False
+       = sepBindsByDropPoint dflags False
            [scrut_fvs, rhs_fvs]
            (freeVarsOfType scrut `unionDVarSet` rhs_ty_fvs)
            to_drop
@@ -425,14 +425,14 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr ty alts)
   where
         -- Float into the scrut and alts-considered-together just like App
     [drop_here1, scrut_drops, alts_drops]
-       = sepBindsByDropPoint dflags False False
+       = sepBindsByDropPoint dflags False
            [scrut_fvs, all_alts_fvs]
            (freeVarsOfType scrut `unionDVarSet` all_alts_ty_fvs)
            to_drop
 
         -- Float into the alts with the is_case flag set
     (drop_here2 : alts_drops_s)
-      = sepBindsByDropPoint dflags True False alts_fvs all_alts_ty_fvs
+      = sepBindsByDropPoint dflags True alts_fvs all_alts_ty_fvs
                             alts_drops
 
     scrut_fvs       = freeVarsOf scrut
@@ -554,7 +554,6 @@ simplifier will immediately float the binding out again.)
 sepBindsByDropPoint
     :: DynFlags
     -> Bool             -- True <=> is case expression
-    -> Bool             -- True <=> drop join points; see Note [Join points]
     -> [FreeVarSet]         -- One set of FVs per drop point
     -> FreeVarSet           -- Vars free in all the types of the drop points
     -> FloatInBinds         -- Candidate floaters
@@ -570,10 +569,10 @@ sepBindsByDropPoint
 
 type DropBox = (FreeVarSet, FloatInBinds)
 
-sepBindsByDropPoint _ _is_case _stop_joins drop_pts _ty_fvs []
+sepBindsByDropPoint _ _is_case drop_pts _ty_fvs []
   = [] : [[] | _ <- drop_pts]   -- cut to the chase scene; it happens
 
-sepBindsByDropPoint dflags is_case stop_joins drop_pts ty_fvs floaters
+sepBindsByDropPoint dflags is_case drop_pts ty_fvs floaters
   = go floaters (map (\fvs -> (fvs, [])) (emptyDVarSet : drop_pts))
   where
     go :: FloatInBinds -> [DropBox] -> [FloatInBinds]
@@ -593,7 +592,6 @@ sepBindsByDropPoint dflags is_case stop_joins drop_pts ty_fvs floaters
           used_in_ty = ty_fvs `intersectsDVarSet` bndrs
 
           drop_here = used_here || not can_push || used_in_ty
-                                || (stop_joins && is_join)
 
                 -- For case expressions we duplicate the binding if it is
                 -- reasonably small, and if it is not used in all the RHSs
@@ -612,9 +610,6 @@ sepBindsByDropPoint dflags is_case stop_joins drop_pts ty_fvs floaters
                        n_used_alts > 1 &&       -- It's used in more than one
                        n_used_alts < n_alts &&  -- ...but not all
                        floatIsDupable dflags bind) -- and we can duplicate the binding
-
-          is_join = case bind of FloatLet b   -> isJoinBind b
-                                 FloatCase {} -> False
 
           new_boxes | drop_here = (insert here_box : fork_boxes)
                     | otherwise = (here_box : new_fork_boxes)
