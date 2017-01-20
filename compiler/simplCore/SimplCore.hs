@@ -208,7 +208,8 @@ getCoreToDo dflags
     -- See Note [Grand plan for static forms].
     static_ptrs_float_outwards =
       runWhen static_ptrs $ CoreDoPasses
-        [ simpl_gently -- Float Out can't handle type lets
+        [ simpl_gently -- Float Out can't handle type lets (sometimes created
+                       -- by simpleOptPgm via mkParallelBindings)
         , CoreDoFloatOutwards FloatOutSwitches
           { floatOutLambdas   = Just 0
           , floatOutConstants = True
@@ -700,13 +701,13 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                    = case sm_phase mode of
                        InitialPhase -> (mg_vect_decls guts, vectVars)
                        _            -> ([], vectVars)
-               ; occ_binds = {-# SCC "OccAnal" #-}
+               ; tagged_binds = {-# SCC "OccAnal" #-}
                      occurAnalysePgm this_mod active_rule rules
                                      maybeVects maybeVectVars binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
-                     (pprCoreBindings occ_binds);
-           lintPassResult hsc_env CoreOccurAnal occ_binds;
+                     (pprCoreBindings tagged_binds);
+           lintPassResult hsc_env CoreOccurAnal tagged_binds;
 
                 -- Get any new rules, and extend the rule base
                 -- See Note [Overall plumbing for rules] in Rules.hs
@@ -724,7 +725,7 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
            ((binds1, rules1), counts1) <-
              initSmpl dflags (mkRuleEnv rule_base2 vis_orphs) fam_envs us1 sz $
                do { env1 <- {-# SCC "SimplTopBinds" #-}
-                            simplTopBinds simpl_env occ_binds
+                            simplTopBinds simpl_env tagged_binds
 
                       -- Apply the substitution to rules defined in this module
                       -- for imported Ids.  Eg  RULE map my_f = blah
