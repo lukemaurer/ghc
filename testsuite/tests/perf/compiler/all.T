@@ -39,7 +39,7 @@ test('T1969',
              # 2013-11-13 17 (x86/Windows, 64bit machine)
              # 2015-07-11 21 (x86/Linux, 64bit machine) use +RTS -G1
              # 2016-04-06 30 (x86/Linux, 64bit machine)
-           (wordsize(64), 78, 20)]),
+           (wordsize(64), 55, 20)]),
              #            28 (amd64/Linux)
              #            34 (amd64/Linux)
              # 2012-09-20 23 (amd64/Linux)
@@ -51,7 +51,6 @@ test('T1969',
              # 2013-09-11 30, 15 (adapt to Phab CI)
              # 2015-06-03 41, (amd64/Linux) use +RTS -G1
              # 2015-10-28 55, (amd64/Linux) emit Typeable at definition site
-             # 2017-01-11 78, (amd64/Linux) Join points (#12988)
       compiler_stats_num_field('max_bytes_used',
           [(platform('i386-unknown-mingw32'), 5719436, 20),
                                  # 2010-05-17 5717704 (x86/Windows)
@@ -568,7 +567,7 @@ test('T5642',
             # 2014-12-10:  641085256 Improvements in constraints solver
             # 2016-04-06:  462677300
 
-            (wordsize(64), 1156587832, 10)])
+            (wordsize(64), 1047124288, 10)])
             # prev:        1300000000
             # 2014-07-17:  1358833928 (general round of updates)
             # 2014-08-07:  1402242360 (caused by 1fc60ea)
@@ -585,7 +584,7 @@ test('T5642',
             # 2016-05-12:  1300685592 Make Generic1 poly-kinded
             # 2016-06-05:   916484672 Refactor derived Generic instances to reduce allocations
             # 2016-09-03:   838316496 Derive the Generic instance in perf/compiler/T5642
-            # 2016-12-19:  1156587832 Join points (not clear why; prof fingers
+            # 2016-12-19:  1047124288 Join points (not clear why; prof fingers
             #                          simplifier)
       ],
       compile,['-O'])
@@ -704,10 +703,9 @@ test('T9675',
           # 2015-07-11    56         (x86/Linux, 64-bit machine) use +RTS -G1
           ]),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 687417808, 10)
+          [(wordsize(64), 608284152, 10)
           # 2014-10-13    544489040
           # 2015-10-28    608284152  emit Typeable at definition site
-          # 2017-01-06    687417808  OccAnal changes
           ,(wordsize(32), 279480696, 10)
           # 2015-07-11    279480696  (x86/Linux, 64-bit machine) use +RTS -G1
           ]),
@@ -797,7 +795,7 @@ test('T9872d',
 test('T9961',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 623666064, 5),
+          [(wordsize(64), 571246936, 5),
           # 2015-01-12    807117816   Initally created
           # 2015-spring   772510192   Got better
           # 2015-05-22    663978160   Fix for #10370 improves it more
@@ -806,7 +804,7 @@ test('T9961',
           # 2016-03-20    519436672   x64_64/Linux   Don't use build desugaring for large lists (#11707)
           # 2016-03-24    568526784   x64_64/Linux   Add eqInt* variants (#11688)
           # 2016-09-01    537297968   x64_64/Linux   Restore w/w limit (#11565)
-          # 2016-12-19    623666064   x64_64/Linux   Join points (#12988)
+          # 2016-12-19    571246936   x64_64/Linux   Join points (#12988)
            (wordsize(32), 275264188, 5)
           # was           375647160
           # 2016-04-06    275264188   x86/Linux
@@ -818,11 +816,10 @@ test('T9961',
 test('T9233',
     [ only_ways(['normal']),
       compiler_stats_num_field('bytes allocated',
-        [(wordsize(64), 1127440160, 5),
+        [(wordsize(64), 984268712, 5),
          # 2015-08-04    999826288     initial value
          # 2016-04-14   1066246248     Final demand analyzer run
          # 2016-06-18    984268712     shuffling around of Data.Functor.Identity
-         # 2017-01-11   1127440160     Join points (#12988)
          (wordsize(32),  515672240, 5)   # Put in your value here if you hit this
          # 2016-04-06    515672240     (x86/Linux) initial value
         ]),
@@ -834,7 +831,7 @@ test('T9233',
 test('T10370',
      [ only_ways(['optasm']),
        compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 39809904, 15),
+          [(wordsize(64), 33049168, 15),
           # 2015-10-22    19548720
           # 2016-02-24    22823976   Changing Levity to RuntimeRep; not sure why this regresses though, even after some analysis
           # 2016-04-14    28256896   final demand analyzer run
@@ -845,16 +842,14 @@ test('T10370',
           #     affected stats on bootstrapped GHC.  However,
           #     when I set -i0.01 with profiling, the heap profiles
           #     were identical, so I think it's just GC noise.
-          # 2017-01-11    39809904   Join points (#12988)
            (wordsize(32), 11371496, 15),
           # 2015-10-22    11371496
           ]),
        compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
-          [(wordsize(64), 148, 15),
+          [(wordsize(64), 121, 15),
           # 2015-10-22     76
           # 2016-04-14    101 final demand analyzer run
           # 2016-08-08    121 see above
-          # 2017-01-11    148 Join points (#12988)
            (wordsize(32),  39, 15),
           # 2015-10-22     39
           ]),
@@ -892,9 +887,8 @@ test('T12227',
 test('T12425',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 133084944, 5),
+          [(wordsize(64), 125831400, 5),
           # initial:    125831400
-          # 2016-12-19  133084944  x86_64/Linux  Join points (#12988)
           ]),
      ],
      compile,
@@ -905,9 +899,8 @@ test('T12234',
        compiler_stats_num_field('bytes allocated',
           [(platform('x86_64-unknown-mingw32'), 77949232, 5),
           # initial:    77949232
-           (wordsize(64), 76970928, 5),
+           (wordsize(64), 72958288, 5),
           # initial:    72958288
-          # 2017-01-10  76970928 x86_64/Linux Join points (#12988)
           ]),
      ],
      compile,
@@ -926,9 +919,8 @@ test('T13035',
 test('T13056',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-         [(wordsize(64), 580668760, 5),
+         [(wordsize(64), 520166912, 5),
          # 2017-01-06    520166912 initial
-         # 2017-01-11    580668760 Join points (#12988)
          ]),
      ],
      compile,
