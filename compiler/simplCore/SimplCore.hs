@@ -204,19 +204,6 @@ getCoreToDo dflags
                            [simpl_phase 0 ["post-worker-wrapper"] max_iter]
                            ))
 
-    float_in = (CoreDoPasses [ CoreDoFloatInwards
-                             , simpl_phase 0 ["post-float-in"] max_iter ])
-      -- Float In tends to create join points:
-      --   let j x = ... in case j 1 of ...
-      --     =>
-      --   case (let j x = ... in j 1) of ...
-      -- But we have to run the simplifier to detect join points, and the sooner
-      -- we catch a join point, the better. On the other hand, we *want* to run
-      -- the simplifier to move the case into the join point.
-      --
-      -- TODO Check whether this helps often enough to be worth it. We could
-      -- also run simpleOptPgm instead.
-
     -- Static forms are moved to the top level with the FloatOut pass.
     -- See Note [Grand plan for static forms].
     static_ptrs_float_outwards =
@@ -300,7 +287,7 @@ getCoreToDo dflags
                 -- Don't stop now!
         simpl_phase 0 ["main"] (max max_iter 3),
 
-        runWhen do_float_in float_in,
+        runWhen do_float_in CoreDoFloatInwards,
             -- Run float-inwards immediately before the strictness analyser
             -- Doing so pushes bindings nearer their use site and hence makes
             -- them more likely to be strict. These bindings might only show
@@ -332,7 +319,7 @@ getCoreToDo dflags
                 -- succeed in commoning up things floated out by full laziness.
                 -- CSE used to rely on the no-shadowing invariant, but it doesn't any more
 
-        runWhen do_float_in float_in,
+        runWhen do_float_in CoreDoFloatInwards,
 
         maybe_rule_check (Phase 0),
 
