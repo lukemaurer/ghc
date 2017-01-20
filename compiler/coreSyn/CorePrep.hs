@@ -283,6 +283,29 @@ This is all very gruesome and horrible. It would be better to figure
 out CafInfo later, after CorePrep.  We'll do that in due course.
 Meanwhile this horrible hack works.
 
+Note [Join points and floating]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Join points can float out of other join points but not out of value bindings:
+
+  let z =
+    let  w = ... in -- can float
+    join k = ... in -- can't float
+    ... jump k ...
+  join j x1 ... xn =
+    let  y = ... in -- can float (but don't want to)
+    join h = ... in -- can float (but not much point)
+    ... jump h ...
+  in ...
+
+Here, the jump to h remains valid if h is floated outward, but the jump to k
+does not.
+
+We don't float *out* of join points. It would only be safe to float out of
+nullary join points (or ones where the arguments are all either type arguments
+or dead binders). Nullary join points aren't ever recursive, so they're always
+effectively one-shot functions, which we don't float out of. We *could* float
+join points from nullary join points, but there's no clear benefit at this
+stage.
 
 Note [Data constructor workers]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -396,7 +419,7 @@ cpeBind top_lvl env (NonRec bndr rhs)
        ; return (extendCorePrepEnv env bndr bndr2,
                  addFloat floats new_float,
                  Nothing) }}
-  | otherwise
+  | otherwise -- See Note [Join points and floating]
   = ASSERT(not (isTopLevel top_lvl)) -- can't have top-level join point
     do { (_, bndr1) <- cpCloneBndr env bndr
        ; (bndr2, rhs1) <- cpeJoinPair env bndr1 rhs
@@ -415,7 +438,7 @@ cpeBind top_lvl env (Rec pairs)
        ; return (extendCorePrepEnvList env (bndrs `zip` bndrs2),
                  unitFloat (FloatLet (Rec all_pairs)),
                  Nothing) }
-  | otherwise
+  | otherwise -- See Note [Join points and floating]
   = do { (env', bndrs1) <- cpCloneBndrs env bndrs
        ; pairs1 <- zipWithM (cpeJoinPair env') bndrs1 rhss
 

@@ -169,6 +169,28 @@ different types, called bad coercions. Following coercions are forbidden:
       coerced to (# B_1,..,B_m #) if n=m and for each pair A_i, B_i rules
       (a-e) holds.
 
+Note [Join points]
+~~~~~~~~~~~~~~~~~~
+
+We check the rules listed in Note [Invariants on join points] in CoreSyn. The
+only one that causes any difficulty is the first: All occurrences must be tail
+calls. To this end, along with the in-scope set, we remember in le_bad_joins the
+subset of join ids that are no longer allowed because they were declared "too
+far away." For example:
+
+  join j x = ... in
+  case e of
+    A -> jump j y -- good
+    B -> case (jump j z) of -- BAD
+           C -> join h = jump j w in ... -- good
+           D -> let x = jump j v in ... -- BAD
+
+A join point remains valid in case branches, so when checking the A branch, j
+is still valid. When we check the scrutinee of the inner case, however, we add j
+to le_bad_joins and catch the error. Similarly, join points can occur free in
+RHSes of other join points but not the RHSes of value bindings (thunks and
+functions).
+
 ************************************************************************
 *                                                                      *
                  Beginning and ending passes
@@ -1697,7 +1719,8 @@ data LintEnv
        , le_subst :: TCvSubst        -- Current type substitution; we also use this
                                      -- to keep track of all the variables in scope,
                                      -- both Ids and TyVars
-       , le_bad_joins :: IdSet       -- Join points that have left scope
+       , le_bad_joins :: IdSet       -- Join points that are no longer valid
+                                     -- See Note [Join points]
        , le_dynflags :: DynFlags     -- DynamicFlags
        }
 
@@ -1754,19 +1777,6 @@ expression. The check is enabled only:
   lambda abstractions.  This binding is injected by CorePrep.
 
   Note that GHC.StaticPtr is itself compiled without -XStaticPointers.
-
-Note [Checking join id occurrences]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Generally it is very important that an id be consistently for a value or a join
-point; thus if the binder says it is a join point, each occurrence site must say
-the same (and agree about the arity). However, the occurrence analyser is
-responsible for discovering potential join points among let bindings, and it
-does not update the occurrence sites, since it's usually run just before the
-simplifier anyway, and the simplifier always propagates binders to their
-occurrences. Since we would like to debug the occurrence analyser, we thus drop
-this invariant when linting its output. (Join points must still be correct in
-other ways, for instance in being only tail-called.)
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~

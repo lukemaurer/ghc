@@ -164,6 +164,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
     (ann_fun, ann_args, ticks) = collectAnnArgsTicks tickishFloatable ann_expr
     (extra_fvs0, fun_fvs)
       | (_, AnnVar _) <- ann_fun = (freeVarsOf ann_fun, emptyDVarSet)
+          -- Don't float into the f in f x y z; see Note [Join points]
       | otherwise                = (emptyDVarSet, freeVarsOf ann_fun)
     (extra_fvs, arg_fvs) = mapAccumL mk_arg_fvs extra_fvs0 ann_args
 
@@ -530,14 +531,24 @@ Note [Join points]
 
 Generally, we don't need to worry about join points - there are places we're
 not allowed to float them, but since they can't have occurrences in those
-places, we're not tempted. The exception is at an invocation of the join point
-itself:
+places, we're not tempted.
 
-  j x y z
+We do need to be careful about jumps, however:
 
-If we traverse this as usual, we might attempt to drop j right at its only use
-(very common if j is recursive). So at an application, we stop ourselves from
-floating join points at all.
+  joinrec j x y z = ... in
+  jump j a b c
+
+Previous versions often floated the definition of a recursive function into its
+only non-recursive occurrence:
+
+  (joinrec j x y z = ... in
+  jump j) a b c -- wrong!
+
+This is a disaster here: the jump must have three arguments.
+
+Thus we don't float into the function position when the function is a variable.
+(We don't do this for functions, either, because there's no point---the
+simplifier will immediately float the binding out again.)
 -}
 
 sepBindsByDropPoint

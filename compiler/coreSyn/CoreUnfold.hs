@@ -590,8 +590,8 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
                 = False
 
     size_up_rhs (bndr, rhs)
-      | isId bndr
-      , Just join_arity <- isJoinId_maybe bndr
+      | Just join_arity <- isJoinId_maybe bndr
+        -- Skip arguments to join point
       , (_bndrs, body) <- collectNBinders join_arity rhs
       = size_up body
       | otherwise

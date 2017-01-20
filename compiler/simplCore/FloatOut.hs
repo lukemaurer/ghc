@@ -108,6 +108,25 @@ vwhich might usefully be separated to
 @
 Well, maybe.  We don't do this at the moment.
 
+Note [Join points]
+~~~~~~~~~~~~~~~~~~
+Every occurrence of a join point must be a tail call (see Note [Invariants on
+join points] in CoreSyn), so we must be careful with how far we float them. The
+mechanism for doing so is the *join ceiling*, detailed in Note [Join ceiling]
+in SetLevels. For us, the significance is that a binder might be marked to be
+dropped at the nearest boundary between tail calls and non-tail calls. For
+example:
+
+  (< join j = ... in
+     let x = < ... > in
+     case < ... > of
+       A -> ...
+       B -> ...
+   >) < ... > < ... >
+
+Here the join ceilings are marked with angle brackets. Either side of an
+application is a join ceiling, as is the scrutinee position of a case
+expression or the RHS of a let binding (but not a join point).
 
 ************************************************************************
 *                                                                      *
@@ -673,10 +692,14 @@ partitionByLevel (Level major minor typ) (FB tops ceils defns)
     (here_ceil, ceils') | typ == JoinCeilLvl = (ceils, emptyBag)
                         | otherwise          = (emptyBag, ceils)
 
+-- Like partitionByLevel, but instead split out the bindings that are marked
+-- to float to the nearest join ceiling (see Note [Join points])
 partitionAtJoinCeiling :: FloatBinds -> (FloatBinds, Bag FloatBind)
 partitionAtJoinCeiling (FB tops ceils defs)
   = (FB tops emptyBag defs, ceils)
 
+-- Perform some action at a join ceiling, i.e., don't let join points float out
+-- (see Note [Join points])
 atJoinCeiling :: (FloatStats, FloatBinds, CoreExpr)
               -> (FloatStats, FloatBinds, CoreExpr)
 atJoinCeiling (fs, floats, expr')

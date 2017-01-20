@@ -232,9 +232,15 @@ libCaseAlt env (con,args,rhs) = (con, args, libCase (addBinders env args) rhs)
 Ids
 ~~~
 
-To unfold, we can't just wrap the id itself in its binding, since it could be
-the invocation of a join point---in which case all occurrences must be
-saturated. Thus we carry along all the arguments.
+To unfold, we can't just wrap the id itself in its binding if it's a join point:
+
+  jump j a b c  =>  (joinrec j x y z = ... in jump j) a b c -- wrong!!!
+
+Every jump must provide all arguments, so we have to be careful to wrap the
+whole jump instead:
+
+  jump j a b c  =>  joinrec j x y z = ... in jump j a b c -- right
+
 -}
 
 libCaseApp :: LibCaseEnv -> Id -> [CoreExpr] -> CoreExpr
