@@ -2643,11 +2643,6 @@ resultTypeOfDupableCont mode bndrs cont
     go (StrictArg _ _ cont) = go cont
     go cont@(ApplyToTy  {}) = go (sc_cont cont)
     go cont@(ApplyToVal {}) = go (sc_cont cont)
-    go cont@(Select { sc_bndr = case_bndr, sc_alts = [(_, bs, _rhs)] })
-      | all isDeadBinder bs  -- InIds
-        && not (isUnliftedType (idType case_bndr))
-        -- Note [Single-alternative-unlifted]
-      = contHoleType cont
     go (Select { sc_alts = alts, sc_cont = cont })
       | not (sm_case_case mode) = contHoleType cont
       | not (altsWouldDup alts) = contResultType cont
@@ -2670,9 +2665,7 @@ When we have
        of alts
 then we can just duplicate those alts because the A and C cases
 will disappear immediately.  This is more direct than creating
-join points and inlining them away; and in some cases we would
-not even create the join points (see Note [Single-alternative case])
-and we would keep the case-of-case which is silly.  See Trac #4930.
+join points and inlining them away.  See Trac #4930.
 -}
 
 mkDupableCont :: SimplEnv -> SimplCont
@@ -2717,15 +2710,6 @@ mkDupableCont env (ApplyToVal { sc_arg = arg, sc_dup = dup, sc_env = se, sc_cont
         ; let app_cont = ApplyToVal { sc_arg = arg'', sc_env = se'
                                     , sc_dup = OkToDup, sc_cont = dup_cont }
         ; return (env'', app_cont, nodup_cont) }
-
-mkDupableCont env cont@(Select { sc_bndr = case_bndr, sc_alts = [(_, bs, _rhs)] })
---  See Note [Single-alternative case]
---  | not (exprIsDupable rhs && contIsDupable case_cont)
---  | not (isDeadBinder case_bndr)
-  | all isDeadBinder bs  -- InIds
-    && not (isUnliftedType (idType case_bndr))
-    -- Note [Single-alternative-unlifted]
-  = return (env, mkBoringStop (contHoleType cont), cont)
 
 mkDupableCont env (Select { sc_bndr = case_bndr, sc_alts = alts
                           , sc_env = se, sc_cont = cont })
@@ -3070,114 +3054,6 @@ Note [Duplicating StrictBind]
 Unlike StrictArg, there doesn't seem anything to gain from
 duplicating a StrictBind continuation, so we don't.
 
-
-Note [Single-alternative cases]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-This case is just like the ArgOf case.  Here's an example:
-        data T a = MkT !a
-        ...(MkT (abs x))...
-Then we get
-        case (case x of I# x' ->
-              case x' <# 0# of
-                True  -> I# (negate# x')
-                False -> I# x') of y {
-          DEFAULT -> MkT y
-Because the (case x) has only one alternative, we'll transform to
-        case x of I# x' ->
-        case (case x' <# 0# of
-                True  -> I# (negate# x')
-                False -> I# x') of y {
-          DEFAULT -> MkT y
-But now we do *NOT* want to make a join point etc, giving
-        case x of I# x' ->
-        let $j = \y -> MkT y
-        in case x' <# 0# of
-                True  -> $j (I# (negate# x'))
-                False -> $j (I# x')
-In this case the $j will inline again, but suppose there was a big
-strict computation enclosing the orginal call to MkT.  Then, it won't
-"see" the MkT any more, because it's big and won't get duplicated.
-And, what is worse, nothing was gained by the case-of-case transform.
-
-So, in circumstances like these, we don't want to build join points
-and push the outer case into the branches of the inner one. Instead,
-don't duplicate the continuation.
-
-When should we use this strategy?  We should not use it on *every*
-single-alternative case:
-  e.g.  case (case ....) of (a,b) -> (# a,b #)
-Here we must push the outer case into the inner one!
-Other choices:
-
-   * Match [(DEFAULT,_,_)], but in the common case of Int,
-     the alternative-filling-in code turned the outer case into
-                case (...) of y { I# _ -> MkT y }
-
-   * Match on single alternative plus (not (isDeadBinder case_bndr))
-     Rationale: pushing the case inwards won't eliminate the construction.
-     But there's a risk of
-                case (...) of y { (a,b) -> let z=(a,b) in ... }
-     Now y looks dead, but it'll come alive again.  Still, this
-     seems like the best option at the moment.
-
-   * Match on single alternative plus (all (isDeadBinder bndrs))
-     Rationale: this is essentially  seq.
-
-   * Match when the rhs is *not* duplicable, and hence would lead to a
-     join point.  This catches the disaster-case above.  We can test
-     the *un-simplified* rhs, which is fine.  It might get bigger or
-     smaller after simplification; if it gets smaller, this case might
-     fire next time round.  NB also that we must test contIsDupable
-     case_cont *too, because case_cont might be big!
-
-     HOWEVER: I found that this version doesn't work well, because
-     we can get         let x = case (...) of { small } in ...case x...
-     When x is inlined into its full context, we find that it was a bad
-     idea to have pushed the outer case inside the (...) case.
-
-There is a cost to not doing case-of-case; see Trac #10626.
-
-Note [Single-alternative-unlifted]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Here's another single-alternative where we really want to do case-of-case:
-
-data Mk1 = Mk1 Int# | Mk2 Int#
-
-M1.f =
-    \r [x_s74 y_s6X]
-        case
-            case y_s6X of tpl_s7m {
-              M1.Mk1 ipv_s70 -> ipv_s70;
-              M1.Mk2 ipv_s72 -> ipv_s72;
-            }
-        of
-        wild_s7c
-        { __DEFAULT ->
-              case
-                  case x_s74 of tpl_s7n {
-                    M1.Mk1 ipv_s77 -> ipv_s77;
-                    M1.Mk2 ipv_s79 -> ipv_s79;
-                  }
-              of
-              wild1_s7b
-              { __DEFAULT -> ==# [wild1_s7b wild_s7c];
-              };
-        };
-
-So the outer case is doing *nothing at all*, other than serving as a
-join-point.  In this case we really want to do case-of-case and decide
-whether to use a real join point or just duplicate the continuation:
-
-    let $j s7c = case x of
-                   Mk1 ipv77 -> (==) s7c ipv77
-                   Mk1 ipv79 -> (==) s7c ipv79
-    in
-    case y of
-      Mk1 ipv70 -> $j ipv70
-      Mk2 ipv72 -> $j ipv72
-
-Hence: check whether the case binder's type is unlifted, because then
-the outer case is *not* a seq.
 
 ************************************************************************
 *                                                                      *

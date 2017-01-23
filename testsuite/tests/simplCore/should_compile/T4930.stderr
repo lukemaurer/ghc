@@ -1,7 +1,7 @@
 
 ==================== Tidy Core ====================
 Result size of Tidy Core
-  = {terms: 45, types: 17, coercions: 0, joins: 0/0}
+  = {terms: 40, types: 15, coercions: 0, joins: 0/0}
 
 -- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T4930.$trModule2 :: GHC.Types.TrName
@@ -32,20 +32,15 @@ T4930.$trModule =
   GHC.Types.Module T4930.$trModule2 T4930.$trModule1
 
 Rec {
--- RHS size: {terms: 23, types: 6, coercions: 0, joins: 0/0}
+-- RHS size: {terms: 18, types: 4, coercions: 0, joins: 0/0}
 T4930.$wfoo [InlPrag=[0], Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int#
 [GblId, Arity=1, Caf=NoCafRefs, Str=<S,U>]
 T4930.$wfoo =
   \ (ww :: GHC.Prim.Int#) ->
-    case case GHC.Prim.tagToEnum# @ Bool (GHC.Prim.<# ww 5#) of {
-           False -> GHC.Types.I# (GHC.Prim.+# ww 2#);
-           True ->
-             case T4930.$wfoo ww of ww1 { __DEFAULT -> GHC.Types.I# ww1 }
-         }
-    of
-    { GHC.Types.I# ipv ->
-    GHC.Prim.+# ww 5#
+    case GHC.Prim.tagToEnum# @ Bool (GHC.Prim.<# ww 5#) of {
+      False -> GHC.Prim.+# ww 5#;
+      True -> case T4930.$wfoo ww of { __DEFAULT -> GHC.Prim.+# ww 5# }
     }
 end Rec }
 
