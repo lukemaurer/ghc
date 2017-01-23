@@ -1947,6 +1947,13 @@ occAnalLamOrRhs :: OccEnv -> [CoreBndr] -> CoreExpr
 occAnalLamOrRhs env [] body
   = case occAnal env body of (body_usage, body') -> (body_usage, [], body')
       -- RHS of thunk or nullary join point
+occAnalLamOrRhs env (bndr:bndrs) body
+  | isTyVar bndr
+  = -- Important: Keep the environment so that we don't inline into an RHS like
+    --   \(@ x) -> C @x (f @x)
+    -- (see the beginning of Note [Cascading inlines]).
+    case occAnalLamOrRhs env bndrs body of
+      (body_usage, bndrs', body') -> (body_usage, bndr:bndrs', body')
 occAnalLamOrRhs env binders body
   = case occAnal env_body body of { (body_usage, body') ->
     let
