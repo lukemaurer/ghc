@@ -204,12 +204,13 @@ corePrepTopBinds initialCorePrepEnv binds
   = go initialCorePrepEnv binds
   where
     go _   []             = return emptyFloats
-    go env (bind : binds) = do (env', bind', maybe_wrap_w_joins)
+    go env (bind : binds) = do (env', floats, maybe_new_bind)
                                  <- cpeBind TopLevel env bind
-                               MASSERT(isNothing maybe_wrap_w_joins)
-                                 -- No join point should float to top
-                               binds' <- go env' binds
-                               return (bind' `appendFloats` binds')
+                               MASSERT(isNothing maybe_new_bind)
+                                 -- Only join points get returned this way by
+                                 -- cpeBind, and no join point may float to top
+                               floatss <- go env' binds
+                               return (floats `appendFloats` floatss)
 
 mkDataConWorkers :: DynFlags -> ModLocation -> [TyCon] -> [CoreBind]
 -- See Note [Data constructor workers]
@@ -396,8 +397,9 @@ Into this one:
 
 cpeBind :: TopLevelFlag -> CorePrepEnv -> CoreBind
         -> UniqSM (CorePrepEnv,
-                   Floats,                       -- Floating value bindings
-                   Maybe (CoreExpr -> CoreExpr)) -- Floating join points
+                   Floats,         -- Floating value bindings
+                   Maybe CoreBind) -- Just bind' <=> returned new bind; no float
+                                   -- Nothing <=> added bind' to floats instead
 cpeBind top_lvl env (NonRec bndr rhs)
   | not (isJoinId bndr)
   = do { (_, bndr1) <- cpCloneBndr env bndr
@@ -425,7 +427,7 @@ cpeBind top_lvl env (NonRec bndr rhs)
        ; (bndr2, rhs1) <- cpeJoinPair env bndr1 rhs
        ; return (extendCorePrepEnv env bndr bndr2,
                  emptyFloats,
-                 Just (Let (NonRec bndr2 rhs1))) }
+                 Just (NonRec bndr2 rhs1)) }
 
 cpeBind top_lvl env (Rec pairs)
   | not (isJoinId (head bndrs))
@@ -445,7 +447,7 @@ cpeBind top_lvl env (Rec pairs)
        ; let bndrs2 = map fst pairs1
        ; return (extendCorePrepEnvList env' (bndrs `zip` bndrs2),
                  emptyFloats,
-                 Just (Let (Rec pairs1))) }
+                 Just (Rec pairs1)) }
   where
     (bndrs, rhss) = unzip pairs
 
@@ -555,12 +557,9 @@ cpeJoinPair env bndr rhs
 
        ; (env', bndrs') <- cpCloneBndrs env bndrs
 
-       ; (floats, body1) <- cpeRhsE env' body
+       ; body' <- cpeBodyNF env' body
 
-       ; body2 <- rhsToBodyNF body1
-
-       ; let body3 = wrapBinds floats body2
-             rhs'  = mkCoreLams bndrs' body3
+       ; let rhs'  = mkCoreLams bndrs' body'
              bndr' = bndr `setIdUnfolding` evaldUnfolding
 
        ; return (bndr', rhs') }
@@ -587,12 +586,12 @@ cpeRhsE _env expr@(Lit {}) = return (emptyFloats, expr)
 cpeRhsE env expr@(Var {})  = cpeApp env expr
 cpeRhsE env expr@(App {}) = cpeApp env expr
 
-cpeRhsE env (Let bind expr)
-  = do { (env', new_binds, maybe_wrap) <- cpeBind NotTopLevel env bind
-       ; (floats, body) <- cpeRhsE env' expr
-       ; let body' = case maybe_wrap of Just wrap -> wrap body
-                                        Nothing   -> body
-       ; return (new_binds `appendFloats` floats, body') }
+cpeRhsE env (Let bind body)
+  = do { (env', bind_floats, maybe_bind') <- cpeBind NotTopLevel env bind
+       ; (body_floats, body') <- cpeRhsE env' body
+       ; let expr' = case maybe_bind' of Just bind' -> Let bind' body'
+                                         Nothing    -> body'
+       ; return (bind_floats `appendFloats` body_floats, expr') }
 
 cpeRhsE env (Tick tickish expr)
   | tickishPlace tickish == PlaceNonLam && tickish `tickishScopesLike` SoftScope
@@ -683,11 +682,6 @@ cpeBody env expr
   = do { (floats1, rhs) <- cpeRhsE env expr
        ; (floats2, body) <- rhsToBody rhs
        ; return (floats1 `appendFloats` floats2, body) }
-
---------
-rhsToBodyNF :: CpeRhs -> UniqSM CpeBody
-rhsToBodyNF rhs = do { (floats,body) <- rhsToBody rhs
-                     ; return (wrapBinds floats body) }
 
 --------
 rhsToBody :: CpeRhs -> UniqSM (Floats, CpeBody)
