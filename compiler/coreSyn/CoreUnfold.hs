@@ -510,11 +510,11 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
     size_up (Let (NonRec binder rhs) body)
       = size_up_rhs (binder, rhs) `addSizeNSD`
         size_up body              `addSizeN`
-        size_up_bndr binder
+        size_up_alloc binder
 
     size_up (Let (Rec pairs) body)
       = foldr (addSizeNSD . size_up_rhs)
-              (size_up body `addSizeN` sum (map (size_up_bndr . fst) pairs))
+              (size_up body `addSizeN` sum (map (size_up_alloc . fst) pairs))
               pairs
 
     size_up (Case e _ _ alts)
@@ -633,16 +633,14 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
         -- A good example is Foreign.C.Error.errrnoToIOError
 
     ------------
-    size_up_bndr bndr
-      |  isTyVar bndr
-      || isUnliftedType (idType bndr)
-      || isJoinId bndr
+    -- Cost to allocate binding with given binder
+    size_up_alloc bndr
+      |  isTyVar bndr                 -- Doesn't exist at runtime
+      || isUnliftedType (idType bndr) -- Doesn't live in heap
+      || isJoinId bndr                -- Not allocated at all
       = 0
       | otherwise
       = 10
-        -- For the allocation
-        -- If the binder has an unlifted type there is no allocation
-        -- Also, join points aren't allocated
 
     ------------
         -- These addSize things have to be here because
