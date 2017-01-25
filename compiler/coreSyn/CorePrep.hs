@@ -554,15 +554,32 @@ cpeJoinPair :: CorePrepEnv -> JoinId -> CoreExpr
 cpeJoinPair env bndr rhs
   = do { let Just join_arity = isJoinId_maybe bndr
              (bndrs, body)   = collectNBinders join_arity rhs
+                                 -- See Note [Arity and join points]
 
        ; (env', bndrs') <- cpCloneBndrs env bndrs
 
-       ; body' <- cpeBodyNF env' body
+       ; body' <- cpeBodyNF env' body -- Will let-bind the body if it starts
+                                      -- with a lambda
 
        ; let rhs'  = mkCoreLams bndrs' body'
              bndr' = bndr `setIdUnfolding` evaldUnfolding
 
        ; return (bndr', rhs') }
+
+{-
+Note [Arity and join points]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A join point has a fixed arity, equal to its join arity (see Note [Join points])
+but not counting type arguments. Since we want everything to have exactly the
+right arity, we must let-bind the body of the RHS if it returns a lambda:
+
+  join j x y z = \w -> ... in ...
+    =>
+  join j x y z = (let f = \w -> ... in f) in ...
+
+This is similar to Note [Silly extra arguments].
+-}
 
 -- ---------------------------------------------------------------------------
 --              CpeRhs: produces a result satisfying CpeRhs
