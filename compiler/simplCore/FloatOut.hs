@@ -128,6 +128,33 @@ Here the join ceilings are marked with angle brackets. Either side of an
 application is a join ceiling, as is the scrutinee position of a case
 expression or the RHS of a let binding (but not a join point).
 
+Why do we *want* do float join points at all? After all, they're never
+allocated, so there's no sharing to be gained by floating them. However, the
+other benefit of floating is making RHSes small, and this can have a significant
+impact. In particular, stream fusion has been known to produce nested loops like
+this:
+
+  joinrec j1 x1 =
+    joinrec j2 x2 =
+      joinrec j3 x3 = ... jump j1 (x3 + 1) ... jump j2 (x3 + 1) ...
+      in jump j3 x2
+    in jump j2 x1
+  in jump j1 x
+
+(Assume x1 and x2 do *not* occur free in j3.)
+
+Here j1 and j2 are wholly superfluous---each of them merely forwards its
+argument to j3. Since j3 only refers to x3, we can float j2 and j3 to make
+everything one big mutual recursion:
+
+  joinrec j1 x1 = jump j2 x1
+          j2 x2 = jump j3 x2
+          j3 x3 = ... jump j1 (x3 + 1) ... jump j2 (x3 + 1) ...
+  in jump j1 x
+
+Now the simplifier will happily inline the trivial j1 and j2, leaving only j3.
+Without floating, we're stuck with three loops instead of one.
+
 ************************************************************************
 *                                                                      *
 \subsection[floatOutwards]{@floatOutwards@: let-floating interface function}

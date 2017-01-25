@@ -47,7 +47,6 @@ floatInwards dflags = map fi_top_bind
       = Rec [ (b, fiExpr dflags [] (freeVars rhs)) | (b, rhs) <- pairs ]
 
 {-
-
 ************************************************************************
 *                                                                      *
 \subsection{Mail from Andr\'e [edited]}
@@ -164,7 +163,10 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
     (ann_fun, ann_args, ticks) = collectAnnArgsTicks tickishFloatable ann_expr
     (extra_fvs0, fun_fvs)
       | (_, AnnVar _) <- ann_fun = (freeVarsOf ann_fun, emptyDVarSet)
-          -- Don't float into the f in f x y z; see Note [Join points]
+          -- Don't float the binding for f into f x y z; see Note [Join points]
+          -- for why we *can't* do it when f is a join point. (If f isn't a
+          -- join point, floating it in isn't especially harmful but it's
+          -- useless since the simplifier will immediately float it back out.)
       | otherwise                = (emptyDVarSet, freeVarsOf ann_fun)
     (extra_fvs, arg_fvs) = mapAccumL mk_arg_fvs extra_fvs0 ann_args
 
@@ -191,6 +193,28 @@ We don't want to float bindings into here
    f (case ... of { x -> x +# y })
 because that might destroy the let/app invariant, which requires
 unlifted function arguments to be ok-for-speculation.
+
+Note [Join points]
+~~~~~~~~~~~~~~~~~~
+
+Generally, we don't need to worry about join points - there are places we're
+not allowed to float them, but since they can't have occurrences in those
+places, we're not tempted.
+
+We do need to be careful about jumps, however:
+
+  joinrec j x y z = ... in
+  jump j a b c
+
+Previous versions often floated the definition of a recursive function into its
+only non-recursive occurrence. But for a join point, this is a disaster:
+
+  (joinrec j x y z = ... in
+  jump j) a b c -- wrong!
+
+Every jump must be exact, so the jump to j must have three arguments. Hence
+we're careful not to float into the target of a jump (though we can float into
+the arguments just fine).
 
 Note [Floating in past a lambda group]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -317,7 +341,7 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
     rhs_fvs  = freeVarsOf rhs
 
     rule_fvs = idRuleAndUnfoldingVarsDSet id        -- See Note [extra_fvs (2): free variables of rules]
-    extra_fvs | noFloatIntoRhs is_join is_rec rhs
+    extra_fvs | noFloatIntoRhs (isJoinId id) NonRecursive rhs
               = rule_fvs `unionDVarSet` freeVarsOf rhs
               | otherwise
               = rule_fvs
@@ -325,8 +349,6 @@ fiExpr dflags to_drop (_,AnnLet (AnnNonRec id rhs) body)
         -- No point in floating in only to float straight out again
         -- We *can't* float into ok-for-speculation unlifted RHSs
         -- But do float into join points
-    is_join = isJoinId id
-    is_rec  = NonRecursive
 
     [shared_binds, extra_binds, rhs_binds, body_binds]
         = sepBindsByDropPoint dflags False
@@ -525,30 +547,6 @@ bind a coercion variable mentioned in any of the types, that binder must
 be dropped right away.
 
 We have to maintain the order on these drop-point-related lists.
-
-Note [Join points]
-~~~~~~~~~~~~~~~~~~
-
-Generally, we don't need to worry about join points - there are places we're
-not allowed to float them, but since they can't have occurrences in those
-places, we're not tempted.
-
-We do need to be careful about jumps, however:
-
-  joinrec j x y z = ... in
-  jump j a b c
-
-Previous versions often floated the definition of a recursive function into its
-only non-recursive occurrence:
-
-  (joinrec j x y z = ... in
-  jump j) a b c -- wrong!
-
-This is a disaster here: the jump must have three arguments.
-
-Thus we don't float into the function position when the function is a variable.
-(We don't do this for functions, either, because there's no point---the
-simplifier will immediately float the binding out again.)
 -}
 
 sepBindsByDropPoint
