@@ -8,7 +8,6 @@ module MkCore (
         mkCoreLams, mkWildCase, mkIfThenElse,
         mkWildValBinder, mkWildEvBinder,
         sortQuantVars, castBottomExpr,
-        mkParallelBindings,
 
         -- * Constructing boxed literals
         mkWordExpr, mkWordExprWord,
@@ -79,7 +78,6 @@ import UniqSupply
 import BasicTypes
 import Util
 import DynFlags
-import VarEnv
 import Data.List
 
 import Data.Char        ( ord )
@@ -222,45 +220,6 @@ their counterparts in CoreSyn, but they are here for consistency
 -- lambda in the result
 mkCoreLams :: [CoreBndr] -> CoreExpr -> CoreExpr
 mkCoreLams = mkLams
-
--- | Create several independent non-recursive let bindings, such that no binding
--- captures a variable free in another binding. This is accomplished by renaming
--- any stale binder and then putting an extra let after the bindings. Thus, the
--- the bindings x=3, y=x, and z=y become
---    let x1 = 3 in
---    let y1 = x in
---    let z  = y in
---    let x  = x1 in
---    let y  = y1 in ...
--- The extra bindings will be cleaned up by the simplifier.
---
--- Often, this could be accomplished by a beta redex:
---    (\x y z -> ...) 3 x y
--- But this is ill-typed if the ... contains a jump to a free join id.
-mkParallelBindings :: InScopeSet
-                   -> [(CoreBndr, CoreExpr)] -> CoreExpr -> CoreExpr
-mkParallelBindings _ [] body
-  = body
-mkParallelBindings ins pairs body
-  = go ins pairs []
-  where
-    go _ [] _ = panic "mkParallelBindings"
-    go _ins [(bndr, rhs)] rev_renames
-      = Let (NonRec bndr rhs) $ foldr add_rename body (reverse rev_renames)
-    go ins ((bndr, rhs) : pairs) rev_renames
-      | bndr `elemInScopeSet` ins
-      = Let (NonRec bndr' rhs) $ go ins' pairs ((bndr, bndr') : rev_renames)
-      | otherwise
-      = Let (NonRec bndr rhs) $ go ins_w_bndr pairs rev_renames
-      where
-        bndr'      = zap $ uniqAway ins bndr
-        ins'       = extendInScopeSet ins bndr'
-        ins_w_bndr = extendInScopeSet ins bndr
-
-    add_rename (bndr, bndr') body
-      = Let (NonRec bndr (varToCoreExpr bndr')) body
-    zap bndr | isId bndr = zapFragileIdInfo bndr
-             | otherwise = bndr
 
 {-
 ************************************************************************

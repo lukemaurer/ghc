@@ -660,7 +660,7 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = lintCoreApp var []
+  = lintCoreVar var 0
 
 lintCoreExpr (Lit lit)
   = return (literalType lit)
@@ -723,9 +723,9 @@ lintCoreExpr (Let (Rec pairs) body)
     (_, dups) = removeDups compare bndrs
 
 lintCoreExpr e@(App _ _)
-    = do { fun_ty <- case fun of Var f -> lintCoreApp f args
-                                 _     -> markAllJoinsBad $ lintCoreExpr fun
-         ; addLoc (AnExpr e) $ lintCoreArgs fun_ty args }
+  = addLoc (AnExpr e) $
+    do { fun_ty <- lintCoreFun fun (length args)
+       ; lintCoreArgs fun_ty args }
   where
     (fun, args) = collectArgs e
 
@@ -792,22 +792,19 @@ lintCoreExpr (Coercion co)
   = do { (k1, k2, ty1, ty2, role) <- lintInCo co
        ; return (mkHeteroCoercionType role k1 k2 ty1 ty2) }
 
-lintCoreApp :: Var -> [CoreExpr]
-            -> LintM Type -- returns type of the *function*
--- Checks that this function can be applied to this many arguments, *not* the
--- arguments themselves
-lintCoreApp var args
+lintCoreVar :: Var -> Int -- Number of arguments (type or value) being passed
+            -> LintM Type -- returns type of the *variable*
+lintCoreVar var nargs
   = do  { checkL (isNonCoVarId var)
                  (text "Non term variable" <+> ppr var)
 
         ; lf <- getLintFlags
           -- Check for a nested occurrence of the StaticPtr constructor.
           -- See Note [Checking StaticPtrs].
-        ; when (not (null args) && lf_check_static_ptrs lf) $
+        ; when (nargs /= 0 && lf_check_static_ptrs lf) $
           case isDataConId_maybe var of
             Just con | dataConName con == staticPtrDataConName
-              -> failWithL $ text "Found StaticPtr nested in an expression: "
-                               <+> ppr (foldl App (Var var) args)
+              -> failWithL $ text "Found StaticPtr nested in an expression"
             _ -> return ()
 
         ; checkDeadIdOcc var
@@ -831,12 +828,28 @@ lintCoreApp var args
             Just join_arity ->
               do  { bad <- isBadJoin var'
                   ; checkL (not bad) $ mkJoinOutOfScopeMsg var'
-                  ; checkL (args `lengthIs` join_arity) $
-                      mkBadJumpMsg var' join_arity (length args) }
+                  ; checkL (nargs == join_arity) $
+                      mkBadJumpMsg var' join_arity nargs }
             Nothing ->
               do  { checkL (not (isJoinId var)) $
                       mkJoinBndrOccMismatchMsg var' var }
         ; return (idType var') }
+
+lintCoreFun :: CoreExpr -> Int -- Number of arguments (type or val) being passed
+            -> LintM Type -- returns type of the *function*
+lintCoreFun (Var var) nargs
+  = lintCoreVar var nargs
+lintCoreFun (Lam var body) nargs
+  -- Act like lintCoreExpr of Lam, but *don't* call markAllJoinsBad; see
+  -- Note [Beta redexes]
+  | nargs /= 0
+  = addLoc (LambdaBodyOf var) $
+    lintBinder var $ \ var' ->
+    do { body_ty <- lintCoreFun body (nargs - 1)
+       ; return $ mkLamType var' body_ty }
+lintCoreFun expr nargs
+  = markAllJoinsBadIf (nargs /= 0) $
+    lintCoreExpr expr
 
 {-
 Note [No alternatives lint check]
@@ -858,6 +871,33 @@ case that the compiler got smarter elsewhere, and the empty case is
 correct, but that exprIsBottom is unable to see it. In particular, the
 empty-type check in exprIsBottom is an approximation. Therefore, this
 check is not fully reliable, and we keep both around.
+
+Note [Beta redexes]
+~~~~~~~~~~~~~~~~~~~
+Consider:
+
+  join j @x y z = ... in
+  (\@x y z -> jump j @x y z) @t e1 e2
+
+This is clearly ill-typed, since the jump is inside both an application and a
+lambda, either of which is enough to disqualify it as a tail call (see Note
+[Invariants on join points] in CoreSyn). However, strictly from a
+lambda-calculus perspective, the term doesn't go wrong---after the two beta
+reductions, the jump *is* a tail call and everything is fine.
+
+Why would we want to allow this when we have let? One reason is that a compound
+beta redex (that is, one with more than one argument) has different scoping
+rules: naively reducing the above example using lets will capture any free
+occurrence of y in e2. More fundamentally, type lets are tricky; many passes,
+such as Float Out, tacitly assume that the incoming program's type lets have
+all been dealt with by the simplifier. Thus we don't want to let-bind any types
+in, say, CoreSubst.simpleOptPgm, which in some circumstances can run immediately
+before Float Out.
+
+All that said, currently CoreSubst.simpleOptPgm is the only thing using this
+loophole, doing so to avoid re-traversing large functions (beta-reducing a type
+lambda without introducing a type let requires a substitution). TODO: Improve
+simpleOptPgm so that we can forget all this ever happened.
 
 ************************************************************************
 *                                                                      *
