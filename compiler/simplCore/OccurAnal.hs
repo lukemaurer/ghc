@@ -65,11 +65,10 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
 
   | otherwise   -- See Note [Glomming]
   = WARN( True, hang (text "Glomming in" <+> ppr this_mod <> colon)
-                   2 (ppr final_usage) )
+                   2 (ppr final_usage ) )
     occ_anald_glommed_binds
   where
     init_env = initOccEnv active_rule
-
     (final_usage, occ_anald_binds) = go init_env binds
     (_, occ_anald_glommed_binds)   = occAnalRecBind init_env TopLevel
                                                     imp_rule_edges
@@ -790,9 +789,7 @@ occAnalNonRecBind env lvl imp_rule_edges binder rhs body_usage
   = (body_usage' +++ rhs_usage', [NonRec tagged_binder rhs'])
   where
     (bndrs, body) = collectBinders rhs
-    make_join = canBecomeJoinPoints lvl NonRecursive body_usage
-                  [(binder, bndrs)]
-    (body_usage', tagged_binder) = tagBinder make_join body_usage binder
+    (body_usage', tagged_binder) = tagNonRecBinder lvl body_usage binder
     (rhs_usage1, bndrs', body') = occAnalNonRecRhs env tagged_binder bndrs body
     rhs' = mkLams bndrs' body'
     rhs_usage2 = case occAnalUnfolding env NonRecursive binder of
@@ -861,16 +858,14 @@ occAnalRec lvl (AcyclicSCC (ND { nd_bndr = bndr, nd_rhs = rhs
   = (body_uds' +++ rhs_uds',
      NonRec tagged_bndr rhs : binds)
   where
-    make_join = canBecomeJoinPoints lvl NonRecursive body_uds
-                                    [(bndr, rhs_bndrs)]
-    (body_uds', tagged_bndr) = tagBinder make_join body_uds bndr
+    (body_uds', tagged_bndr) = tagNonRecBinder lvl body_uds bndr
     rhs_uds' = adjustRhsUsage (willBeJoinId_maybe tagged_bndr) NonRecursive
                               rhs_bndrs rhs_uds
 
         -- The Rec case is the interesting one
         -- See Note [Recursive bindings: the grand plan]
         -- See Note [Loop breaking]
-occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
+occAnalRec lvl (CyclicSCC details_s) (body_uds, binds)
   | not (any (`usedIn` body_uds) bndrs) -- NB: look at body_uds, not total_uds
   = (body_uds, binds)                   -- See Note [Dead code]
 
@@ -882,36 +877,15 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
     (final_uds, Rec pairs : binds)
 
   where
-    bndrs    = map nd_bndr orig_details_s
+    bndrs    = map nd_bndr details_s
     bndr_set = mkVarSet bndrs
-
-    ----------------------------
-    -- Compute usage details
-    orig_total_uds = foldl add_uds body_uds orig_details_s
-
-    make_joins = canBecomeJoinPoints lvl Recursive orig_total_uds
-                   [ (nd_bndr nd, nd_rhs_bndrs nd) | nd <- orig_details_s ]
-    details_s = map adjust orig_details_s
-    total_uds = foldl add_uds body_uds details_s
-    final_uds = total_uds `minusDetails` bndr_set
-    add_uds usage_so_far nd = usage_so_far +++ nd_uds nd
-
-    adjust nd@(ND { nd_bndr = bndr', nd_rhs_bndrs = bndrs', nd_uds = uds })
-      = nd { nd_uds = adjustRhsUsage (will_be_join bndr') Recursive bndrs' uds }
-    -- Haven't tagged the binders yet, so can't use willBeJoinId_maybe
-    will_be_join bndr'
-      | make_joins
-      , let occ = lookupDetails orig_total_uds bndr'
-      , AlwaysTailCalled arity <- tailCallInfo occ
-      = Just arity
-      | otherwise
-      = isJoinId_maybe bndr'
 
     ------------------------------
         -- See Note [Choosing loop breakers] for loop_breaker_nodes
+    final_uds :: UsageDetails
     loop_breaker_nodes :: [LetrecNode]
-    loop_breaker_nodes = mkLoopBreakerNodes make_joins bndr_set total_uds
-                                            details_s
+    (final_uds, loop_breaker_nodes)
+      = mkLoopBreakerNodes lvl bndr_set body_uds details_s
 
     ------------------------------
     weak_fvs :: VarSet
@@ -928,6 +902,7 @@ occAnalRec lvl (CyclicSCC orig_details_s) (body_uds, binds)
           -- lb-edges], so a fresh SCC computation would yield a
           -- single CyclicSCC result; and reOrderNodes deals with
           -- exactly that case
+
 
 ------------------------------------------------------------------
 --                 Loop breaking
@@ -1284,17 +1259,26 @@ makeNode env imp_rule_edges bndr_set (bndr, rhs)
                       -- isn't the right thing (it tells about
                       -- RULE activation), so we'd need more plumbing
 
-mkLoopBreakerNodes :: Bool -> VarSet -> UsageDetails -> [Details]
-                   -> [LetrecNode]
--- Does three things
+mkLoopBreakerNodes :: TopLevelFlag
+                   -> VarSet
+                   -> UsageDetails   -- for BODY of let
+                   -> [Details]
+                   -> (UsageDetails, -- adjusted
+                       [LetrecNode])
+-- Does four things
 --   a) tag each binder with its occurrence info
 --   b) add a NodeScore to each node
 --   c) make a Node with the right dependency edges for
 --      the loop-breaker SCC analysis
-mkLoopBreakerNodes make_joins bndr_set total_uds details_s
-  = map mk_lb_node details_s
+--   d) adjust each RHS's usage details according to
+--      the binder's (new) shotness and join-point-hood
+mkLoopBreakerNodes lvl bndr_set body_uds details_s
+  = (final_uds, zipWith mk_lb_node details_s bndrs')
   where
-    mk_lb_node nd@(ND { nd_bndr = bndr, nd_rhs = rhs, nd_inl = inl_fvs })
+    (final_uds, bndrs') = tagRecBinders lvl body_uds
+                            [ (nd_bndr nd, nd_uds nd, nd_rhs_bndrs nd)
+                            | nd <- details_s ]
+    mk_lb_node nd@(ND { nd_bndr = bndr, nd_rhs = rhs, nd_inl = inl_fvs }) bndr'
       = (nd', varUnique bndr, nonDetKeysUFM lb_deps)
               -- It's OK to use nonDetKeysUFM here as
               -- stronglyConnCompFromEdgedVerticesR is still deterministic with edges
@@ -1302,7 +1286,6 @@ mkLoopBreakerNodes make_joins bndr_set total_uds details_s
               -- Note [Deterministic SCC] in Digraph.
       where
         nd'     = nd { nd_bndr = bndr', nd_score = score }
-        bndr'   = snd $ tagBinder make_joins total_uds bndr
         score   = nodeScore bndr bndr' rhs lb_deps
         lb_deps = extendFvs_ rule_fv_env inl_fvs
 
@@ -1996,7 +1979,7 @@ wrapAltRHS env (Just (scrut_var, let_rhs)) alt_usg bndrs alt_rhs
     -- if the scrutinee was a cast, so we must gather their
     -- usage. See Note [Gather occurrences of coercion variables]
     (let_rhs_usg, let_rhs') = occAnal env let_rhs
-    (alt_usg', tagged_scrut_var) = tagBinder False alt_usg scrut_var
+    (alt_usg', [tagged_scrut_var]) = tagLamBinders alt_usg [scrut_var]
 
 wrapAltRHS _ _ alt_usg _ alt_rhs
   = (alt_usg, alt_rhs)
@@ -2417,10 +2400,6 @@ delDetailsList :: UsageDetails -> [Id] -> UsageDetails
 delDetailsList ud bndrs
   = ud `alterUsageDetails` (`delVarEnvList` bndrs)
 
-minusDetails :: UsageDetails -> IdEnv a -> UsageDetails
-minusDetails ud bndrs
-  = ud `alterUsageDetails` (`minusVarEnv` bndrs)
-
 emptyDetails :: UsageDetails
 emptyDetails = UD { ud_env       = emptyVarEnv
                   , ud_z_many    = emptyVarEnv
@@ -2532,28 +2511,84 @@ tagLamBinders usage binders = usage' `seq` (usage', bndrs')
     (usage', bndrs') = mapAccumR tag_lam usage binders
     tag_lam usage bndr = (usage2, bndr')
       where
-        (usage1, bndr') = tagBinder False usage bndr
+        occ    = lookupDetails usage bndr
+        bndr'  = setBinderOcc (markNonTailCalled occ) bndr
+                   -- Don't try to make an argument into a join point
+        usage1 = usage `delDetails` bndr
         usage2 | isId bndr = addManyOccsSet usage1 (idUnfoldingVars bndr)
                                -- This is effectively the RHS of a
                                -- non-join-point binding, so it's okay to use
                                -- addManyOccsSet, which assumes no tail calls
                | otherwise = usage1
 
-tagBinder :: Bool                   -- Can it be a join point?
-          -> UsageDetails           -- Of scope
-          -> CoreBndr               -- Binders
-          -> (UsageDetails,         -- Details with binders removed
-              IdWithOccInfo)        -- Tagged binders
+tagNonRecBinder :: TopLevelFlag           -- At top level?
+                -> UsageDetails           -- Of scope
+                -> CoreBndr               -- Binder
+                -> (UsageDetails,         -- Details with binder removed
+                    IdWithOccInfo)        -- Tagged binder
 
-tagBinder make_join usage binder
+tagNonRecBinder lvl usage binder
  = let
-     usage'  = usage `delDetails` binder
      occ     = lookupDetails usage binder
-     occ'    | make_join = occ
-             | otherwise = markNonTailCalled occ
+     will_be_join = decideJoinPointHood lvl usage [binder]
+     occ'    | will_be_join = occ -- must already be marked AlwaysTailCalled
+             | otherwise    = markNonTailCalled occ
      binder' = setBinderOcc occ' binder
+     usage'  = usage `delDetails` binder
    in
    usage' `seq` (usage', binder')
+
+tagRecBinders :: TopLevelFlag           -- At top level?
+              -> UsageDetails           -- Of body of let ONLY
+              -> [(CoreBndr,            -- Binder
+                   UsageDetails,        -- RHS usage details
+                   [CoreBndr])]         -- Lambdas in new RHS
+              -> (UsageDetails,         -- Adjusted details for whole scope,
+                                        -- with binders removed
+                  [IdWithOccInfo])      -- Tagged binders
+-- Substantially more complicated than non-recursive case. Need to adjust RHS
+-- details *before* tagging binders (because the tags depend of the RHSes).
+tagRecBinders lvl body_uds triples
+ = let
+     (bndrs, rhs_udss, _) = unzip3 triples
+
+     -- 1. Determine join-point-hood of whole group, as determined by
+     --    the *unadjusted* usage details
+     unadj_uds     = body_uds +++ combineUsageDetailsList rhs_udss
+     will_be_joins = decideJoinPointHood lvl unadj_uds bndrs
+
+     -- 2. Adjust usage details of each RHS, taking into account the
+     --    join-point-hood decision
+     rhs_udss' = map adjust triples
+     adjust (bndr, rhs_uds, rhs_bndrs)
+       = adjustRhsUsage mb_join_arity Recursive rhs_bndrs rhs_uds
+       where
+         -- Can't use willBeJoinId_maybe here because we haven't tagged the
+         -- binder yet (the tag depends on these adjustments!)
+         mb_join_arity
+           | will_be_joins
+           , let occ = lookupDetails unadj_uds bndr
+           , AlwaysTailCalled arity <- tailCallInfo occ
+           = Just arity
+           | otherwise
+           = ASSERT(not will_be_joins) -- Should be AlwaysTailCalled if we're
+                                       -- making join points!
+             Nothing
+
+     -- 3. Compute final usage details from adjusted RHS details
+     adj_uds   = body_uds +++ combineUsageDetailsList rhs_udss'
+
+     -- 4. Tag each binder with its adjusted details modulo the
+     --    join-point-hood decision
+     occs      = map (lookupDetails adj_uds) bndrs
+     occs'     | will_be_joins = occs
+               | otherwise     = map markNonTailCalled occs
+     bndrs'    = zipWith setBinderOcc occs' bndrs
+
+     -- 5. Drop the binders from the adjusted details and return
+     usage'    = adj_uds `delDetailsList` bndrs
+   in
+   (usage', bndrs')
 
 setBinderOcc :: OccInfo -> CoreBndr -> CoreBndr
 setBinderOcc occ_info bndr
@@ -2568,32 +2603,42 @@ setBinderOcc occ_info bndr
   | otherwise = setIdOccInfo bndr occ_info
 
 -- | Decide whether some bindings should be made into join points or not.
--- Returns `False` if *either* they can't be join points *or* they already
--- are. Note that it's an all-or-nothing decision, as if multiple binders are
--- given, they're assumed to be mutually recursive.
+-- Returns `False` if they can't be join points. Note that it's an
+-- all-or-nothing decision, as if multiple binders are given, they're assumed to
+-- be mutually recursive.
 --
--- See Note [Invariants for join points] in IdInfo.
-canBecomeJoinPoints :: TopLevelFlag -> RecFlag -> UsageDetails
-                    -> [(CoreBndr, [CoreBndr])] -- Lambdas on RHS
+-- See Note [Invariants for join points] in CoreSyn.
+decideJoinPointHood :: TopLevelFlag -> UsageDetails
+                    -> [CoreBndr]
                     -> Bool
-canBecomeJoinPoints TopLevel _ _ _
+decideJoinPointHood TopLevel _ _
   = False
-canBecomeJoinPoints NotTopLevel rec_flag usage pairs
-  = all ok pairs
+decideJoinPointHood NotTopLevel usage bndrs
+  | isJoinId (head bndrs)
+  = ASSERT(all_ok) -- Make sure everything's consistent. In theory, this
+                   -- analysis could be conservative w/r/t what Core Lint would
+                   -- accept, but currently we don't expect it to be.
+    all_ok
+  | otherwise
+  = all_ok
   where
-    ok (bndr, bndrs)
-      | isJoinId bndr
-      = False -- Already a join id
-      | AlwaysTailCalled arity <- tailCallInfo (lookupDetails usage bndr)
-      , not (isRec rec_flag && arity /= length bndrs)
-          -- Recursive join points can't be partially applied
-      , all (ok_rule arity) (idCoreRules bndr)
+    -- See Note [Invariants on join points]; invariants cited by number below.
+    -- Invariant 2 is always satisfiable by the simplifier by eta expansion.
+    all_ok = -- Invariant 3: Either all are join points or none are
+             all ok bndrs
+
+    ok bndr
+      | -- Invariant 1: Only tail calls, all same join arity
+        AlwaysTailCalled arity <- tailCallInfo (lookupDetails usage bndr)
+      , -- Invariant 1 as applied to LHSes of rules
+        all (ok_rule arity) (idCoreRules bndr)
+        -- Invariant 4: Satisfies polymorphism rule
       , isValidJoinPointType arity (idType bndr)
       = True
       | otherwise
       = False
 
-    ok_rule _ BuiltinRule{} = True
+    ok_rule _ BuiltinRule{} = False -- only possible with plugin shenanigans
     ok_rule join_arity (Rule { ru_args = args })
       = length args == join_arity
 

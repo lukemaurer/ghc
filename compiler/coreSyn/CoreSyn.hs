@@ -522,17 +522,29 @@ Join points must follow these invariants:
      same number of arguments, counting both types and values; we call this the
      "join arity" (to distinguish from regular arity, which only counts values).
   2. For join arity n, the right-hand side must begin with at least n lambdas.
-  3. If the binding is recursive, then:
-       a. For a join arity n, the right-hand side must begin with exactly n
-          lambdas.
-       b. All other bindings in the recursive group must also be join points.
+  3. If the binding is recursive, then all other bindings in the recursive group
+     must also be join points.
   4. The binding's type must not be polymorphic in its return type.
 
-Strictly speaking, invariant 2 is redundant, since the rigorous definition of
-"tail call" circumscribes the contexts in which a tail call may appear; the
-right-hand side of a non-join-point definition is not such a context, and
-neither would be the RHS of a join point with extra lambdas. See Section 3 of
-the paper (Note [Join points]).
+Examples:
+
+  join j1  x = 1 + x in jump j (jump j x)  -- Fails 1: non-tail call
+  join j1' x = 1 + x in if even a
+                          then jump j1 a
+                          else jump j1 a b -- Fails 1: inconsistent calls
+  join j2  x = flip (+) x in j2 1 2        -- Fails 2: not enough lambdas
+  join j2' x = \y -> x + y in j3 1         -- Passes: extra lams ok for non-rec
+  join j @a (x :: a) = x                   -- Fails 4: polymorphic in ret type
+
+Invariant 1 applies to left-hand sides of rewrite rules, so a rule for a join
+point must have an exact call as its LHS.
+
+Strictly speaking, invariant 3 is redundant, since a call from inside a lazy
+binding isn't a tail call. Since a let-bound value can't invoke a free join
+point, then, they can't be mutually recursive. (A Core binding group *can*
+include spurious extra bindings if the occurrence analyser hasn't run, so
+invariant 3 does still need to be checked.) For the rigorous definition of
+"tail call", see Section 3 of the paper (Note [Join points]).
 
 Invariant 4 is subtle; see Note [The polymorphism rule of join points].
 
