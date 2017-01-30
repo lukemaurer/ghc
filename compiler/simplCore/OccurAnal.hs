@@ -2548,13 +2548,15 @@ tagBinder :: Bool                   -- Can it be a join point?
 tagBinder make_join usage binder
  = let
      usage'  = usage `delDetails` binder
-     binder' | make_join = setBinderOcc usage binder
-             | otherwise = setBinderOcc (markAllNonTailCalled usage) binder
+     occ     = lookupDetails usage binder
+     occ'    | make_join = occ
+             | otherwise = markNonTailCalled occ
+     binder' = setBinderOcc occ' binder
    in
    usage' `seq` (usage', binder')
 
-setBinderOcc :: UsageDetails -> CoreBndr -> CoreBndr
-setBinderOcc usage bndr
+setBinderOcc :: OccInfo -> CoreBndr -> CoreBndr
+setBinderOcc occ_info bndr
   | isTyVar bndr      = bndr
   | isExportedId bndr = if isNoOcc (idOccInfo bndr)
                           then bndr
@@ -2564,8 +2566,6 @@ setBinderOcc usage bndr
             -- about to re-generate it and it shouldn't be "sticky"
 
   | otherwise = setIdOccInfo bndr occ_info
-  where
-    occ_info = lookupDetails usage bndr
 
 -- | Decide whether some bindings should be made into join points or not.
 -- Returns `False` if *either* they can't be join points *or* they already
