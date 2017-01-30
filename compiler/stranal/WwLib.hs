@@ -292,14 +292,14 @@ Now that we have special rules about join points, however, this is Not Good if
 the original function is itself a join point, as then it may contain invocations
 of other join points:
 
-  let join j1 x = ...
-  let join j2 y = if y == 0 then 0 else j1 y
+  join j1 x = ...
+  join j2 y = if y == 0 then 0 else j1 y
 
   =>
 
-  let join j1 x = ...
-  let join $wj2 y# = let wy = I# y# in (\y -> if y == 0 then 0 else j1 y) wy
-  let join j2 y = case y of I# y# -> $wj2 y#
+  join j1 x = ...
+  join $wj2 y# = let wy = I# y# in (\y -> if y == 0 then 0 else jump j1 y) wy
+  join j2 y = case y of I# y# -> jump $wj2 y#
 
 There can't be an intervening lambda between a join point's declaration and its
 occurrences, so $wj2 here is wrong. But of course, this is easy enough to fix:
