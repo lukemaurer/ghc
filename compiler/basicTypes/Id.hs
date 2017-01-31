@@ -125,7 +125,8 @@ import Var( Id, CoVar, DictId, JoinId,
             InId,  InVar,
             OutId, OutVar,
             idInfo, idDetails, setIdDetails, globaliseId, varType,
-            isId, isLocalId, isGlobalId, isExportedId )
+            isId, isLocalId, isGlobalId, isExportedId,
+            isJoinId, isJoinId_maybe )
 import qualified Var
 
 import Type
@@ -415,13 +416,11 @@ isPrimOpId              :: Id -> Bool
 isFCallId               :: Id -> Bool
 isDataConWorkId         :: Id -> Bool
 isDFunId                :: Id -> Bool
-isJoinId                :: Var -> Bool
 
 isClassOpId_maybe       :: Id -> Maybe Class
 isPrimOpId_maybe        :: Id -> Maybe PrimOp
 isFCallId_maybe         :: Id -> Maybe ForeignCall
 isDataConWorkId_maybe   :: Id -> Maybe DataCon
-isJoinId_maybe          :: Var -> Maybe JoinArity
 
 isRecordSelector id = case Var.idDetails id of
                         RecSelId {}     -> True
@@ -470,23 +469,6 @@ isDataConWorkId id = case Var.idDetails id of
 isDataConWorkId_maybe id = case Var.idDetails id of
                         DataConWorkId con -> Just con
                         _                 -> Nothing
-
-isJoinId id | isId id
-            = case Var.idDetails id of
-                        JoinId {} -> True
-                        _         -> False
-            | otherwise
-            = False
-
-isJoinId_maybe id | isId id
-                  = case Var.idDetails id of
-                        JoinId arity -> Just arity
-                        _            -> Nothing
-                  | otherwise
-                  = Nothing
-
-idJoinArity :: JoinId -> JoinArity
-idJoinArity id = isJoinId_maybe id `orElse` pprPanic "idJoinArity" (ppr id)
 
 isDataConId_maybe :: Id -> Maybe DataCon
 isDataConId_maybe id = case Var.idDetails id of
@@ -574,6 +556,9 @@ isDictId id = isDictTy (idType id)
 *                                                                      *
 ************************************************************************
 -}
+
+idJoinArity :: JoinId -> JoinArity
+idJoinArity id = isJoinId_maybe id `orElse` pprPanic "idJoinArity" (ppr id)
 
 asJoinId :: Id -> JoinArity -> JoinId
 asJoinId id arity = WARN(not (isLocalId id),

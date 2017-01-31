@@ -11,7 +11,7 @@ Haskell. [WDP 94/11])
 module IdInfo (
         -- * The IdDetails type
         IdDetails(..), pprIdDetails, coVarDetails, isCoVarDetails,
-        JoinArity, joinIdDetails, isJoinIdDetails,
+        JoinArity, isJoinIdDetails_maybe,
         RecSelParent(..),
 
         -- * The IdInfo type
@@ -169,12 +169,9 @@ isCoVarDetails :: IdDetails -> Bool
 isCoVarDetails CoVarId = True
 isCoVarDetails _       = False
 
-joinIdDetails :: JoinArity -> IdDetails
-joinIdDetails = JoinId
-
-isJoinIdDetails :: IdDetails -> Bool
-isJoinIdDetails (JoinId _) = True
-isJoinIdDetails _          = False
+isJoinIdDetails_maybe :: IdDetails -> Maybe JoinArity
+isJoinIdDetails_maybe (JoinId join_arity) = Just join_arity
+isJoinIdDetails_maybe _                   = Nothing
 
 instance Outputable IdDetails where
     ppr = pprIdDetails
@@ -527,9 +524,9 @@ zapTailCallInfo :: IdInfo -> Maybe IdInfo
 zapTailCallInfo info
   = case occInfo info of
       occ | isAlwaysTailCalled occ -> Just (info `setOccInfo` safe_occ)
+          | otherwise              -> Nothing
         where
           safe_occ = occ { occ_tail = NoTailCallInfo }
-      _                            -> Nothing
 
 {-
 ************************************************************************

@@ -57,6 +57,7 @@ module Var (
         -- ** Predicates
         isId, isTyVar, isTcTyVar,
         isLocalVar, isLocalId, isCoVar, isNonCoVarId, isTyCoVar,
+        isJoinId, isJoinId_maybe,
         isGlobalId, isExportedId,
         mustHaveLocalBinding,
 
@@ -83,8 +84,11 @@ module Var (
 
 import {-# SOURCE #-}   TyCoRep( Type, Kind, pprKind )
 import {-# SOURCE #-}   TcType( TcTyVarDetails, pprTcTyVarDetails, vanillaSkolemTv )
-import {-# SOURCE #-}   IdInfo( IdDetails, IdInfo, coVarDetails, isCoVarDetails, vanillaIdInfo, pprIdDetails )
+import {-# SOURCE #-}   IdInfo( IdDetails, IdInfo, coVarDetails, isCoVarDetails,
+                                isJoinIdDetails_maybe,
+                                vanillaIdInfo, pprIdDetails )
 
+import BasicTypes ( JoinArity )
 import Name hiding (varName)
 import Unique ( Uniquable, Unique, getKey, getUnique
               , mkUniqueGrimily, nonDetCmpUnique )
@@ -92,6 +96,7 @@ import Util
 import Binary
 import DynFlags
 import Outputable
+import Maybes
 
 import Data.Data
 
@@ -612,6 +617,14 @@ isNonCoVarId :: Var -> Bool
 -- A term variable (Id) that is /not/ a coercion variable
 isNonCoVarId (Id { id_details = details }) = not (isCoVarDetails details)
 isNonCoVarId _                             = False
+
+isJoinId :: Var -> Bool
+isJoinId (Id { id_details = details }) = isJust (isJoinIdDetails_maybe details)
+isJoinId _                             = False
+
+isJoinId_maybe :: Var -> Maybe JoinArity
+isJoinId_maybe (Id { id_details = details }) = isJoinIdDetails_maybe details
+isJoinId_maybe _                             = Nothing
 
 isLocalId :: Var -> Bool
 isLocalId (Id { idScope = LocalId _ }) = True
