@@ -11,7 +11,7 @@
 module CmmUtils(
         -- CmmType
         primRepCmmType, slotCmmType, slotForeignHint,
-        typeCmmType, typeForeignHint,
+        typeCmmType, typeForeignHint, primRepForeignHint,
 
         -- CmmLit
         zeroCLit, mkIntCLit,
@@ -65,14 +65,13 @@ module CmmUtils(
 #include "HsVersions.h"
 
 import TyCon    ( PrimRep(..), PrimElemRep(..) )
-import RepType  ( UnaryType, SlotTy (..), typePrimRep )
+import RepType  ( UnaryType, SlotTy (..), typePrimRep1 )
 
 import SMRep
 import Cmm
 import BlockId
 import CLabel
 import Outputable
-import Unique
 import DynFlags
 import Util
 import CodeGen.Platform
@@ -90,7 +89,8 @@ import Hoopl
 
 primRepCmmType :: DynFlags -> PrimRep -> CmmType
 primRepCmmType _      VoidRep          = panic "primRepCmmType:VoidRep"
-primRepCmmType dflags PtrRep           = gcWord dflags
+primRepCmmType dflags LiftedRep        = gcWord dflags
+primRepCmmType dflags UnliftedRep      = gcWord dflags
 primRepCmmType dflags IntRep           = bWord dflags
 primRepCmmType dflags WordRep          = bWord dflags
 primRepCmmType _      Int64Rep         = b64
@@ -120,11 +120,12 @@ primElemRepCmmType FloatElemRep  = f32
 primElemRepCmmType DoubleElemRep = f64
 
 typeCmmType :: DynFlags -> UnaryType -> CmmType
-typeCmmType dflags ty = primRepCmmType dflags (typePrimRep ty)
+typeCmmType dflags ty = primRepCmmType dflags (typePrimRep1 ty)
 
 primRepForeignHint :: PrimRep -> ForeignHint
 primRepForeignHint VoidRep      = panic "primRepForeignHint:VoidRep"
-primRepForeignHint PtrRep       = AddrHint
+primRepForeignHint LiftedRep    = AddrHint
+primRepForeignHint UnliftedRep  = AddrHint
 primRepForeignHint IntRep       = SignedHint
 primRepForeignHint WordRep      = NoHint
 primRepForeignHint Int64Rep     = SignedHint
@@ -142,7 +143,7 @@ slotForeignHint FloatSlot     = NoHint
 slotForeignHint DoubleSlot    = NoHint
 
 typeForeignHint :: UnaryType -> ForeignHint
-typeForeignHint = primRepForeignHint . typePrimRep
+typeForeignHint = primRepForeignHint . typePrimRep1
 
 ---------------------------------------------------
 --
@@ -167,13 +168,13 @@ zeroExpr dflags = CmmLit (zeroCLit dflags)
 mkWordCLit :: DynFlags -> Integer -> CmmLit
 mkWordCLit dflags wd = CmmInt wd (wordWidth dflags)
 
-mkByteStringCLit :: Unique -> [Word8] -> (CmmLit, GenCmmDecl CmmStatics info stmt)
+mkByteStringCLit
+  :: CLabel -> [Word8] -> (CmmLit, GenCmmDecl CmmStatics info stmt)
 -- We have to make a top-level decl for the string,
 -- and return a literal pointing to it
-mkByteStringCLit uniq bytes
-  = (CmmLabel lbl, CmmData (Section sec lbl)  $ Statics lbl [CmmString bytes])
+mkByteStringCLit lbl bytes
+  = (CmmLabel lbl, CmmData (Section sec lbl) $ Statics lbl [CmmString bytes])
   where
-    lbl = mkStringLitLabel uniq
     -- This can not happen for String literals (as there \NUL is replaced by
     -- C0 80). However, it can happen with Addr# literals.
     sec = if 0 `elem` bytes then ReadOnlyData else CString

@@ -373,7 +373,8 @@ data Floats = Floats (OrdList OutBind) FloatFlag
 type JoinFloats = OrdList OutBind
 
 data FloatFlag
-  = FltLifted   -- All bindings are lifted and lazy
+  = FltLifted   -- All bindings are lifted and lazy *or*
+                --     consist of a single primitive string literal
                 --  Hence ok to float to top level, or recursive
 
   | FltOkSpec   -- All bindings are FltLifted *or*
@@ -440,6 +441,9 @@ unitFloat bind = ASSERT(all (not . isJoinId) (bindersOf bind))
     flag (Rec {})                = FltLifted
     flag (NonRec bndr rhs)
       | not (isStrictId bndr)    = FltLifted
+      | exprIsLiteralString rhs  = FltLifted
+          -- String literals can be floated freely.
+          -- See Note [CoreSyn top-level string ltierals] in CoreSyn.
       | exprOkForSpeculation rhs = FltOkSpec  -- Unlifted, and lifted but ok-for-spec (eg HNF)
       | otherwise                = ASSERT2( not (isUnliftedType (idType bndr)), ppr bndr )
                                    FltCareful
@@ -823,7 +827,7 @@ substCo env co = Coercion.substCo (getTCvSubst env) co
 substIdType :: SimplEnv -> Id -> Id
 substIdType (SimplEnv { seInScope = in_scope, seTvSubst = tv_env, seCvSubst = cv_env }) id
   |  (isEmptyVarEnv tv_env && isEmptyVarEnv cv_env)
-  || isEmptyVarSet (tyCoVarsOfType old_ty)
+  || noFreeVarsOfType old_ty
   = id
   | otherwise = Id.setIdType id (Type.substTy (TCvSubst in_scope tv_env cv_env) old_ty)
                 -- The tyCoVarsOfType is cheaper than it looks

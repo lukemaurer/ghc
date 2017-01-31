@@ -30,7 +30,6 @@ import TcRnTypes
 import TcRnMonad
 import TcType
 import TcMType
-import TcHsSyn ( checkForRepresentationPolymorphism )
 import TcValidity ( checkValidType )
 import TcUnify( tcSkolemise, unifyType, noThing )
 import Inst( topInstantiate )
@@ -79,7 +78,7 @@ especially on value bindings.  Here's an overview.
     the HsType, producing a Type, and wraps it in a CompleteSig, and
     extend the type environment with this polymorphic 'f'.
 
-  - For a /partial/signauture, like 'g' above, tcTySig does nothing
+  - For a /partial/signature, like 'g' above, tcTySig does nothing
     Instead it just wraps the pieces in a PartialSig, to be handled
     later.
 
@@ -258,7 +257,7 @@ isCompleteHsSig (HsWC { hswc_wcs = wcs }) = null wcs
 
 {- Note [Fail eagerly on bad signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-If a type signaure is wrong, fail immediately:
+If a type signature is wrong, fail immediately:
 
  * the type sigs may bind type variables, so proceeding without them
    can lead to a cascade of errors
@@ -390,7 +389,7 @@ tcPatSynSig name sig_ty
        -- arguments become the types of binders. We thus cannot allow
        -- levity polymorphism here
        ; let (arg_tys, _) = tcSplitFunTys body_ty
-       ; mapM_ (checkForRepresentationPolymorphism empty) arg_tys
+       ; mapM_ (checkForLevPoly empty) arg_tys
 
        ; traceTc "tcTySig }" $
          vcat [ text "implicit_tvs" <+> ppr_tvs implicit_tvs

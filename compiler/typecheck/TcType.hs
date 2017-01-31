@@ -15,7 +15,7 @@ The "tc" prefix is for "TypeChecker", because the type checker
 is the principal client.
 -}
 
-{-# LANGUAGE CPP, MultiWayIf #-}
+{-# LANGUAGE CPP, MultiWayIf, FlexibleContexts #-}
 
 module TcType (
   --------------------------------
@@ -60,12 +60,13 @@ module TcType (
   tcSplitForAllTy_maybe,
   tcSplitForAllTys, tcSplitPiTys, tcSplitForAllTyVarBndrs,
   tcSplitPhiTy, tcSplitPredFunTy_maybe,
-  tcSplitFunTy_maybe, tcSplitFunTys, tcFunArgTy, tcFunResultTy, tcSplitFunTysN,
+  tcSplitFunTy_maybe, tcSplitFunTys, tcFunArgTy, tcFunResultTy, tcFunResultTyN,
+  tcSplitFunTysN,
   tcSplitTyConApp, tcSplitTyConApp_maybe, tcRepSplitTyConApp_maybe,
   tcTyConAppTyCon, tcTyConAppArgs,
   tcSplitAppTy_maybe, tcSplitAppTy, tcSplitAppTys, tcRepSplitAppTy_maybe,
   tcGetTyVar_maybe, tcGetTyVar, nextRole,
-  tcSplitSigmaTy, tcDeepSplitSigmaTy_maybe,
+  tcSplitSigmaTy, tcSplitNestedSigmaTys, tcDeepSplitSigmaTy_maybe,
 
   ---------------------------------
   -- Predicates.
@@ -142,7 +143,7 @@ module TcType (
   mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, tcSplitMethodTy,
-  isRuntimeRepVar, isLevityPolymorphic,
+  isRuntimeRepVar, isKindLevPoly,
   isVisibleBinder, isInvisibleBinder,
 
   -- Type substitutions
@@ -172,6 +173,7 @@ module TcType (
   tyCoFVsOfType, tyCoFVsOfTypes,
   tyCoVarsOfTypeDSet, tyCoVarsOfTypesDSet, closeOverKindsDSet,
   tyCoVarsOfTypeList, tyCoVarsOfTypesList,
+  noFreeVarsOfType,
 
   --------------------------------
   -- Transforming Types to TcTypes
@@ -198,7 +200,7 @@ import ForeignCall
 import VarSet
 import Coercion
 import Type
-import RepType (tyConPrimRep)
+import RepType
 import TyCon
 
 -- others:
@@ -280,7 +282,7 @@ reasons:
     TyVars, bring 'k' and 'a' into scope, and kind check the
     signature for 'foo'.  In doing so we call solveEqualities to
     solve any kind equalities in foo's signature.  So the solver
-    may see free occurences of 'k'.
+    may see free occurrences of 'k'.
 
 It's convenient to simply treat these TyVars as skolem constants,
 which of course they are.  So
@@ -296,6 +298,18 @@ This is a bit of a change from an earlier era when we remoselessly
 insisted on real TcTyVars in the type checker.  But that seems
 unnecessary (for skolems, TyVars are fine) and it's now very hard
 to guarantee, with the advent of kind equalities.
+
+Note [Coercion variables in free variable lists]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+There are several places in the GHC codebase where functions like
+tyCoVarsOfType, tyCoVarsOfCt, et al. are used to compute the free type
+variables of a type. The "Co" part of these functions' names shouldn't be
+dismissed, as it is entirely possible that they will include coercion variables
+in addition to type variables! As a result, there are some places in TcType
+where we must take care to check that a variable is a _type_ variable (using
+isTyVar) before calling tcTyVarDetails--a partial function that is not defined
+for coercion variables--on the variable. Failing to do so led to
+GHC Trac #12785.
 -}
 
 -- See Note [TcTyVars in the typechecker]
@@ -930,7 +944,7 @@ data TcDepVars  -- See Note [Dependent type variables]
   = DV { dv_kvs :: DTyCoVarSet  -- "kind" variables (dependent)
        , dv_tvs :: DTyVarSet    -- "type" variables (non-dependent)
          -- A variable may appear in both sets
-         -- E.g.   T k (x::k)    The first occurence of k makes it
+         -- E.g.   T k (x::k)    The first occurrence of k makes it
          --                      show up in dv_tvs, the second in dv_kvs
          -- See Note [Dependent type variables]
     }
@@ -982,7 +996,7 @@ So:  dv_kvs            are the kind variables of the type
 Note that
 
 * A variable can occur in both.
-      T k (x::k)    The first occurence of k makes it
+      T k (x::k)    The first occurrence of k makes it
                     show up in dv_tvs, the second in dv_kvs
 
 * We include any coercion variables in the "dependent",
@@ -1063,6 +1077,7 @@ isTouchableOrFmv ctxt_tclvl tv
 
 isTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isTouchableMetaTyVar ctxt_tclvl tv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl }
@@ -1070,13 +1085,16 @@ isTouchableMetaTyVar ctxt_tclvl tv
                     ppr tv $$ ppr tv_tclvl $$ ppr ctxt_tclvl )
            tv_tclvl `sameDepthAs` ctxt_tclvl
       _ -> False
+  | otherwise = False
 
 isFloatedTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isFloatedTouchableMetaTyVar ctxt_tclvl tv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl } -> tv_tclvl `strictlyDeeperThan` ctxt_tclvl
       _ -> False
+  | otherwise = False
 
 isImmutableTyVar :: TyVar -> Bool
 isImmutableTyVar tv = isSkolemTyVar tv
@@ -1089,10 +1107,12 @@ isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
         -- with a type constructor application; in particular,
         -- not a SigTv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv { mtv_info = SigTv } -> False
         _                           -> True
+  | otherwise = True
 
 isFmvTyVar tv
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
@@ -1122,16 +1142,20 @@ isSkolemTyVar tv
         _other    -> True
 
 isOverlappableTyVar tv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         SkolemTv _ overlappable -> overlappable
         _                       -> False
+  | otherwise = False
 
 isMetaTyVar tv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
         MetaTv {} -> True
         _         -> False
+  | otherwise = False
 
 -- isAmbiguousTyVar is used only when reporting type errors
 -- It picks out variables that are unbound, namely meta
@@ -1139,10 +1163,12 @@ isMetaTyVar tv
 -- RtClosureInspect.zonkRTTIType.  These are "ambiguous" in
 -- the sense that they stand for an as-yet-unknown type
 isAmbiguousTyVar tv
+  | isTyVar tv -- See Note [Coercion variables in free variable lists]
   = case tcTyVarDetails tv of
         MetaTv {}     -> True
         RuntimeUnk {} -> True
         _             -> False
+  | otherwise = False
 
 isMetaTyVarTy :: TcType -> Bool
 isMetaTyVarTy (TyVarTy tv) = isMetaTyVar tv
@@ -1332,6 +1358,34 @@ tcSplitSigmaTy ty = case tcSplitForAllTys ty of
                         (tvs, rho) -> case tcSplitPhiTy rho of
                                         (theta, tau) -> (tvs, theta, tau)
 
+-- | Split a sigma type into its parts, going underneath as many @ForAllTy@s
+-- as possible. For example, given this type synonym:
+--
+-- @
+-- type Traversal s t a b = forall f. Applicative f => (a -> f b) -> s -> f t
+-- @
+--
+-- if you called @tcSplitSigmaTy@ on this type:
+--
+-- @
+-- forall s t a b. Each s t a b => Traversal s t a b
+-- @
+--
+-- then it would return @([s,t,a,b], [Each s t a b], Traversal s t a b)@. But
+-- if you instead called @tcSplitNestedSigmaTys@ on the type, it would return
+-- @([s,t,a,b,f], [Each s t a b, Applicative f], (a -> f b) -> s -> f t)@.
+tcSplitNestedSigmaTys :: Type -> ([TyVar], ThetaType, Type)
+-- NB: This is basically a pure version of deeplyInstantiate (from Inst) that
+-- doesn't compute an HsWrapper.
+tcSplitNestedSigmaTys ty
+    -- If there's a forall, split it apart and try splitting the rho type
+    -- underneath it.
+  | Just (arg_tys, tvs1, theta1, rho1) <- tcDeepSplitSigmaTy_maybe ty
+  = let (tvs2, theta2, rho2) = tcSplitNestedSigmaTys rho1
+    in (tvs1 ++ tvs2, theta1 ++ theta2, mkFunTys arg_tys rho2)
+    -- If there's no forall, we're done.
+  | otherwise = ([], [], ty)
+
 -----------------------
 tcDeepSplitSigmaTy_maybe
   :: TcSigmaType -> Maybe ([TcType], [TyVar], ThetaType, TcSigmaType)
@@ -1398,7 +1452,7 @@ tcSplitFunTy_maybe _                                    = Nothing
 tcSplitFunTysN :: Arity                      -- N: Number of desired args
                -> TcRhoType
                -> Either Arity               -- Number of missing arrows
-                        ([TcSigmaType],      -- Arg types (N or fewer)
+                        ([TcSigmaType],      -- Arg types (always N types)
                          TcSigmaType)        -- The rest of the type
 -- ^ Split off exactly the specified number argument types
 -- Returns
@@ -1422,6 +1476,14 @@ tcFunArgTy    ty = fst (tcSplitFunTy ty)
 
 tcFunResultTy :: Type -> Type
 tcFunResultTy ty = snd (tcSplitFunTy ty)
+
+-- | Strips off n *visible* arguments and returns the resulting type
+tcFunResultTyN :: HasDebugCallStack => Arity -> Type -> Type
+tcFunResultTyN n ty
+  | Right (_, res_ty) <- tcSplitFunTysN n ty
+  = res_ty
+  | otherwise
+  = pprPanic "tcFunResultTyN" (ppr n <+> ppr ty)
 
 -----------------------
 tcSplitAppTy_maybe :: Type -> Maybe (Type, Type)
@@ -2279,7 +2341,7 @@ marshalableTyCon :: DynFlags -> TyCon -> Validity
 marshalableTyCon dflags tc
   | isUnliftedTyCon tc
   , not (isUnboxedTupleTyCon tc || isUnboxedSumTyCon tc)
-  , tyConPrimRep tc /= VoidRep -- Note [Marshalling VoidRep]
+  , not (null (tyConPrimRep tc)) -- Note [Marshalling void]
   = validIfUnliftedFFITypes dflags
   | otherwise
   = boxedMarshalableTyCon tc
@@ -2317,7 +2379,7 @@ legalFIPrimResultTyCon :: DynFlags -> TyCon -> Validity
 legalFIPrimResultTyCon dflags tc
   | isUnliftedTyCon tc
   , isUnboxedTupleTyCon tc || isUnboxedSumTyCon tc
-     || tyConPrimRep tc /= VoidRep   -- Note [Marshalling VoidRep]
+     || not (null (tyConPrimRep tc))   -- Note [Marshalling void]
   = validIfUnliftedFFITypes dflags
 
   | otherwise
@@ -2332,8 +2394,8 @@ validIfUnliftedFFITypes dflags
   | otherwise = NotValid (text "To marshal unlifted types, use UnliftedFFITypes")
 
 {-
-Note [Marshalling VoidRep]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Marshalling void]
+~~~~~~~~~~~~~~~~~~~~~~~
 We don't treat State# (whose PrimRep is VoidRep) as marshalable.
 In turn that means you can't write
         foreign import foo :: Int -> State# RealWorld

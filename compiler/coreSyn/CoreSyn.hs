@@ -3,7 +3,7 @@
 (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, FlexibleContexts #-}
+{-# LANGUAGE CPP, DeriveDataTypeable, FlexibleContexts #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -65,8 +65,7 @@ module CoreSyn (
         maybeUnfoldingTemplate, otherCons,
         isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
-        isStableUnfolding,
-        isClosedUnfolding, hasSomeUnfolding,
+        isStableUnfolding, isFragileUnfolding, hasSomeUnfolding,
         isBootUnfolding,
         canUnfold, neverUnfoldGuidance, isStableSource,
 
@@ -193,7 +192,9 @@ These data types are the heart of the compiler
 --
 --    The right hand sides of all top-level and recursive @let@s
 --    /must/ be of lifted type (see "Type#type_classification" for
---    the meaning of /lifted/ vs. /unlifted/).
+--    the meaning of /lifted/ vs. /unlifted/). There is one exception
+--    to this rule, top-level @let@s are allowed to bind primitive
+--    string literals, see Note [CoreSyn top-level string literals].
 --
 --    See Note [CoreSyn let/app invariant]
 --    See Note [Levity polymorphism invariants]
@@ -272,7 +273,7 @@ data Expr b
   | App   (Expr b) (Arg b)
   | Lam   b (Expr b)
   | Let   (Bind b) (Expr b)
-  | Case  (Expr b) b Type [Alt b]       -- See #case_invariant#
+  | Case  (Expr b) b Type [Alt b]       -- See #case_invariants#
   | Cast  (Expr b) Coercion
   | Tick  (Tickish Id) (Expr b)
   | Type  Type
@@ -363,6 +364,46 @@ Note [CoreSyn letrec invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 See #letrec_invariant#
 
+Note [CoreSyn top-level string literals]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As an exception to the usual rule that top-level binders must be lifted,
+we allow binding primitive string literals (of type Addr#) of type Addr# at the
+top level. This allows us to share string literals earlier in the pipeline and
+crucially allows other optimizations in the Core2Core pipeline to fire.
+Consider,
+
+  f n = let a::Addr# = "foo"#
+        in \x -> blah
+
+In order to be able to inline `f`, we would like to float `a` to the top.
+Another option would be to inline `a`, but that would lead to duplicating string
+literals, which we want to avoid. See Trac #8472.
+
+The solution is simply to allow top-level unlifted binders. We can't allow
+arbitrary unlifted expression at the top-level though, unlifted binders cannot
+be thunks, so we just allow string literals.
+
+Also see Note [Compilation plan for top-level string literals].
+
+Note [Compilation plan for top-level string literals]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Here is a summary on how top-level string literals are handled by various
+parts of the compilation pipeline.
+
+* In the source language, there is no way to bind a primitive string literal
+  at the top leve.
+
+* In Core, we have a special rule that permits top-level Addr# bindings. See
+  Note [CoreSyn top-level string literals]. Core-to-core passes may introduce
+  new top-level string literals.
+
+* In STG, top-level string literals are explicitly represented in the syntax
+  tree.
+
+* A top-level string literal may end up exported from a module. In this case,
+  in the object file, the content of the exported literal is given a label with
+  the _bytes suffix.
+
 Note [CoreSyn let/app invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The let/app invariant
@@ -406,6 +447,9 @@ A type (t::TYPE r) is "levity polymorphic" if 'r' has any free variables.
 For example
   \(r::RuntimeRep). \(a::TYPE r). \(x::a). e
 is illegal because x's type has kind (TYPE r), which has 'r' free.
+
+See Note [Levity polymorphism checking] in DsMonad to see where these
+invariants are established for user-written code.
 
 Note [CoreSyn let goal]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -652,7 +696,7 @@ continuation, they must have the same type; hence the direct explanation above.)
 ********************************************************************* -}
 
 {- Many passes apply a substitution, and it's very handy to have type
-   synonyms to remind us whether or not the subsitution has been applied -}
+   synonyms to remind us whether or not the substitution has been applied -}
 
 -- Pre-cloning or substitution
 type InBndr     = CoreBndr
@@ -735,7 +779,7 @@ data Tickish id =
   -- valid. Note that it is still undesirable though, as this reduces
   -- their usefulness for debugging and profiling. Therefore we will
   -- generally try only to make use of this property where it is
-  -- neccessary to enable optimizations.
+  -- necessary to enable optimizations.
   | SourceNote
     { sourceSpan :: RealSrcSpan -- ^ Source covered
     , sourceName :: String      -- ^ Name for source location
@@ -943,7 +987,8 @@ tickishPlace SourceNote{}  = PlaceNonLam
 -- making the second tick redundant.
 tickishContains :: Eq b => Tickish b -> Tickish b -> Bool
 tickishContains (SourceNote sp1 n1) (SourceNote sp2 n2)
-  = n1 == n2 && containsSpan sp1 sp2
+  = containsSpan sp1 sp2 && n1 == n2
+    -- compare the String last
 tickishContains t1 t2
   = t1 == t2
 
@@ -979,7 +1024,7 @@ chooseOrphanAnchor :: NameSet -> IsOrphan
 -- Something (rule, instance) is relate to all the Names in this
 -- list. Choose one of them to be an "anchor" for the orphan.  We make
 -- the choice deterministic to avoid gratuitious changes in the ABI
--- hash (Trac #4012).  Specficially, use lexicographic comparison of
+-- hash (Trac #4012).  Specifically, use lexicographic comparison of
 -- OccName rather than comparing Uniques
 --
 -- NB: 'minimum' use Ord, and (Ord OccName) works lexicographically
@@ -1292,7 +1337,7 @@ data UnfoldingSource
                        -- to the current RHS during compilation as with
                        -- InlineRhs.
                        --
-                       -- See Note [InlineRules]
+                       -- See Note [InlineStable]
 
   | InlineCompulsory   -- Something that *has* no binding, so you *must* inline it
                        -- Only a few primop-like things have this property
@@ -1483,11 +1528,6 @@ isStableUnfolding (CoreUnfolding { uf_src = src }) = isStableSource src
 isStableUnfolding (DFunUnfolding {})               = True
 isStableUnfolding _                                = False
 
-isClosedUnfolding :: Unfolding -> Bool          -- No free variables
-isClosedUnfolding (CoreUnfolding {}) = False
-isClosedUnfolding (DFunUnfolding {}) = False
-isClosedUnfolding _                  = True
-
 -- | Only returns False if there is no unfolding information available at all
 hasSomeUnfolding :: Unfolding -> Bool
 hasSomeUnfolding NoUnfolding   = False
@@ -1502,12 +1542,34 @@ neverUnfoldGuidance :: UnfoldingGuidance -> Bool
 neverUnfoldGuidance UnfNever = True
 neverUnfoldGuidance _        = False
 
+isFragileUnfolding :: Unfolding -> Bool
+-- An unfolding is fragile if it mentions free variables or
+-- is otherwise subject to change.  A robust one can be kept.
+-- See Note [Fragile unfoldings]
+isFragileUnfolding (CoreUnfolding {}) = True
+isFragileUnfolding (DFunUnfolding {}) = True
+isFragileUnfolding _                  = False
+  -- NoUnfolding, BootUnfolding, OtherCon are all non-fragile
+
 canUnfold :: Unfolding -> Bool
 canUnfold (CoreUnfolding { uf_guidance = g }) = not (neverUnfoldGuidance g)
 canUnfold _                                   = False
 
-{-
-Note [InlineRules]
+{- Note [Fragile unfoldings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An unfolding is "fragile" if it mentions free variables (and hence would
+need substitution) or might be affected by optimisation.  The non-fragile
+ones are
+
+   NoUnfolding, BootUnfolding
+
+   OtherCon {}    If we know this binder (say a lambda binder) will be
+                  bound to an evaluated thing, we want to retain that
+                  info in simpleOptExpr; see Trac #13077.
+
+We consider even a StableUnfolding as fragile, because it needs substitution.
+
+Note [InlineStable]
 ~~~~~~~~~~~~~~~~~
 When you say
       {-# INLINE f #-}

@@ -696,7 +696,7 @@ instance Binary SrcStrictness where
       do h <- getByte bh
          case h of
            0 -> return SrcLazy
-           1 -> return SrcLazy
+           1 -> return SrcStrict
            _ -> return NoSrcStrict
 
 instance Binary SrcUnpackedness where
@@ -1109,7 +1109,6 @@ dataConUserType (MkData { dcUnivTyVars = univ_tvs,
     mkFunTys theta $
     mkFunTys arg_tys $
     res_ty
-  where
 
 -- | Finds the instantiated types of the arguments required to construct a 'DataCon' representation
 -- NB: these INCLUDE any dictionary args

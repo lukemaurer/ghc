@@ -23,7 +23,8 @@ module CoreUnfold (
         noUnfolding, mkImplicitUnfolding,
         mkUnfolding, mkCoreUnfolding,
         mkTopUnfolding, mkSimpleUnfolding, mkWorkerUnfolding,
-        mkInlineUnfolding, mkInlinableUnfolding, mkWwInlineRule,
+        mkInlineUnfolding, mkInlineUnfoldingWithArity,
+        mkInlinableUnfolding, mkWwInlineRule,
         mkCompulsoryUnfolding, mkDFunUnfolding,
         specUnfolding,
 
@@ -125,20 +126,34 @@ mkWorkerUnfolding dflags work_fn
 
 mkWorkerUnfolding _ _ _ = noUnfolding
 
-mkInlineUnfolding :: Maybe Arity -> CoreExpr -> Unfolding
-mkInlineUnfolding mb_arity expr
+-- | Make an unfolding that may be used unsaturated
+-- (ug_unsat_ok = unSaturatedOk) and that is reported as having its
+-- manifest arity (the number of outer lambdas applications will
+-- resolve before doing any work).
+mkInlineUnfolding :: CoreExpr -> Unfolding
+mkInlineUnfolding expr
   = mkCoreUnfolding InlineStable
                     True         -- Note [Top-level flag on inline rules]
                     expr' guide
   where
     expr' = simpleOptExpr expr
-    guide = case mb_arity of
-              Nothing    -> UnfWhen { ug_arity = manifestArity expr'
-                                    , ug_unsat_ok = unSaturatedOk
-                                    , ug_boring_ok = boring_ok }
-              Just arity -> UnfWhen { ug_arity = arity
-                                    , ug_unsat_ok = needSaturated
-                                    , ug_boring_ok = boring_ok }
+    guide = UnfWhen { ug_arity = manifestArity expr'
+                    , ug_unsat_ok = unSaturatedOk
+                    , ug_boring_ok = boring_ok }
+    boring_ok = inlineBoringOk expr'
+
+-- | Make an unfolding that will be used once the RHS has been saturated
+-- to the given arity.
+mkInlineUnfoldingWithArity :: Arity -> CoreExpr -> Unfolding
+mkInlineUnfoldingWithArity arity expr
+  = mkCoreUnfolding InlineStable
+                    True         -- Note [Top-level flag on inline rules]
+                    expr' guide
+  where
+    expr' = simpleOptExpr expr
+    guide = UnfWhen { ug_arity = arity
+                    , ug_unsat_ok = needSaturated
+                    , ug_boring_ok = boring_ok }
     boring_ok = inlineBoringOk expr'
 
 mkInlinableUnfolding :: DynFlags -> CoreExpr -> Unfolding
@@ -822,7 +837,7 @@ Conclusion:
 Note [Literal integer size]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Literal integers *can* be big (mkInteger [...coefficients...]), but
-need not be (S# n).  We just use an aribitrary big-ish constant here
+need not be (S# n).  We just use an arbitrary big-ish constant here
 so that, in particular, we don't inline top-level defns like
    n = S# 5
 There's no point in doing so -- any optimisations will see the S#
@@ -1383,7 +1398,7 @@ However, watch out:
 Note [Interaction of exprIsWorkFree and lone variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The lone-variable test says "don't inline if a case expression
-scrutines a lone variable whose unfolding is cheap".  It's very
+scrutinises a lone variable whose unfolding is cheap".  It's very
 important that, under these circumstances, exprIsConApp_maybe
 can spot a constructor application. So, for example, we don't
 consider

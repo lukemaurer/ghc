@@ -17,7 +17,7 @@ import Vectorise.Env
 import Vectorise.Monad
 
 import HscTypes hiding      ( MonadThings(..) )
-import CoreUnfold           ( mkInlineUnfolding )
+import CoreUnfold           ( mkInlineUnfoldingWithArity )
 import PprCore
 import CoreSyn
 import CoreMonad            ( CoreM, getHscEnv )
@@ -300,7 +300,7 @@ vectTopBinder var inline expr
  = do {   -- Vectorise the type attached to the var.
       ; vty  <- vectType (idType var)
 
-          -- If there is a vectorisation declartion for this binding, make sure its type matches
+          -- If there is a vectorisation declaration for this binding, make sure its type matches
       ; (_, vectDecl) <- lookupVectDecl var
       ; case vectDecl of
           Nothing             -> return ()
@@ -325,7 +325,7 @@ vectTopBinder var inline expr
     }
   where
     unfolding = case inline of
-                  Inline arity -> mkInlineUnfolding (Just arity) expr
+                  Inline arity -> mkInlineUnfoldingWithArity arity expr
                   DontInline   -> noUnfolding
 {-
 !!!TODO: dfuns and unfoldings:

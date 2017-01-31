@@ -81,6 +81,7 @@ module HscMain
     , showModuleIndex
     ) where
 
+import Data.Data hiding (Fixity, TyCon)
 import Id
 import GHCi.RemoteTypes ( ForeignHValue )
 import ByteCodeGen      ( byteCodeGen, coreExprToBCOs )
@@ -98,6 +99,7 @@ import Module
 import Packages
 import RdrName
 import HsSyn
+import HsDumpAst
 import CoreSyn
 import StringBuffer
 import Parser
@@ -330,6 +332,8 @@ hscParse' mod_summary
             logWarningsReportErrors (getMessages pst dflags)
             liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed "Parser" $
                                    ppr rdr_module
+            liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed_ast "Parser AST" $
+                                   text (showAstData NoBlankSrcSpan rdr_module)
             liftIO $ dumpIfSet_dyn dflags Opt_D_source_stats "Source Statistics" $
                                    ppSourceStats False rdr_module
 
@@ -1359,7 +1363,7 @@ hscCompileCmmFile hsc_env filename output_filename = runHsc hsc_env $ do
 
 doCodeGen   :: HscEnv -> Module -> [TyCon]
             -> CollectedCCs
-            -> [StgBinding]
+            -> [StgTopBinding]
             -> HpcInfo
             -> IO (Stream IO CmmGroup ())
          -- Note we produce a 'Stream' of CmmGroups, so that the
@@ -1425,7 +1429,7 @@ doCodeGen hsc_env this_mod data_tycons
 
 
 myCoreToStg :: DynFlags -> Module -> CoreProgram
-            -> IO ( [StgBinding] -- output program
+            -> IO ( [StgTopBinding] -- output program
                   , CollectedCCs) -- cost centre info (declared and used)
 myCoreToStg dflags this_mod prepd_binds = do
     let stg_binds
@@ -1662,10 +1666,11 @@ hscParseIdentifier :: HscEnv -> String -> IO (Located RdrName)
 hscParseIdentifier hsc_env str =
     runInteractiveHsc hsc_env $ hscParseThing parseIdentifier str
 
-hscParseThing :: (Outputable thing) => Lexer.P thing -> String -> Hsc thing
+hscParseThing :: (Outputable thing, Data thing)
+              => Lexer.P thing -> String -> Hsc thing
 hscParseThing = hscParseThingWithLocation "<interactive>" 1
 
-hscParseThingWithLocation :: (Outputable thing) => String -> Int
+hscParseThingWithLocation :: (Outputable thing, Data thing) => String -> Int
                           -> Lexer.P thing -> String -> Hsc thing
 hscParseThingWithLocation source linenumber parser str
   = withTiming getDynFlags
@@ -1684,6 +1689,8 @@ hscParseThingWithLocation source linenumber parser str
         POk pst thing -> do
             logWarningsReportErrors (getMessages pst dflags)
             liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed "Parser" (ppr thing)
+            liftIO $ dumpIfSet_dyn dflags Opt_D_dump_parsed_ast "Parser AST" $
+                                   text $ showAstData NoBlankSrcSpan thing
             return thing
 
 

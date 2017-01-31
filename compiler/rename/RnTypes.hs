@@ -1121,7 +1121,7 @@ the programmer actually wrote, so you can't find it out from the Name.
 
 Furthermore, the second argument is guaranteed not to be another
 operator application.  Why? Because the parser parses all
-operator appications left-associatively, EXCEPT negation, which
+operator applications left-associatively, EXCEPT negation, which
 we need to handle specially.
 Infix types are read in a *right-associative* way, so that
         a `op` b `op` c
@@ -1227,11 +1227,12 @@ get_op :: LHsExpr Name -> Name
 -- See RnExpr.rnUnboundVar
 get_op (L _ (HsVar (L _ n)))   = n
 get_op (L _ (HsUnboundVar uv)) = mkUnboundName (unboundVarOcc uv)
+get_op (L _ (HsRecFld (Unambiguous _ n))) = n
 get_op other                   = pprPanic "get_op" (ppr other)
 
 -- Parser left-associates everything, but
 -- derived instances may have correctly-associated things to
--- in the right operarand.  So we just check that the right operand is OK
+-- in the right operand.  So we just check that the right operand is OK
 right_op_ok :: Fixity -> HsExpr Name -> Bool
 right_op_ok fix1 (OpApp _ _ fix2 _)
   = not error_please && associate_right
@@ -1530,7 +1531,7 @@ extractHsTyRdrTyVars :: LHsType RdrName -> RnM FreeKiTyVars
 -- It's used when making the for-alls explicit.
 -- Does not return any wildcards
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned.
+-- occurrence is returned.
 -- See Note [Kind and type-variable binders]
 extractHsTyRdrTyVars ty
   = do { FKTV kis k_set tys t_set all <- extract_lty TypeLevel ty emptyFKTV
@@ -1540,20 +1541,20 @@ extractHsTyRdrTyVars ty
 
 -- | Extracts free type and kind variables from types in a list.
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned and the rest is filtered out.
+-- occurrence is returned and the rest is filtered out.
 -- See Note [Kind and type-variable binders]
 extractHsTysRdrTyVars :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVars tys
   = rmDupsInRdrTyVars <$> extractHsTysRdrTyVarsDups tys
 
 -- | Extracts free type and kind variables from types in a list.
--- When the same name occurs multiple times in the types, all occurences
+-- When the same name occurs multiple times in the types, all occurrences
 -- are returned.
 extractHsTysRdrTyVarsDups :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVarsDups tys
   = extract_ltys TypeLevel tys emptyFKTV
 
--- | Removes multiple occurences of the same name from FreeKiTyVars.
+-- | Removes multiple occurrences of the same name from FreeKiTyVars.
 rmDupsInRdrTyVars :: FreeKiTyVars -> FreeKiTyVars
 rmDupsInRdrTyVars (FKTV kis k_set tys t_set all)
   = FKTV (nubL kis) k_set (nubL tys) t_set (nubL all)

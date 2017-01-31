@@ -112,10 +112,7 @@ test('T4321',
      omit_ways(['ghci']),
      compile_and_run, ['-O ' + sse2_opts])
 
-test('T3736',
-     extra_clean(['T3736.speed.f32']),
-     run_command,
-     ['$MAKE -s --no-print-directory T3736'])
+test('T3736', [], run_command, ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [extra_clean(['T3738a.hi', 'T3738a.o']),
       stats_num_field('peak_megabytes_allocated', (2, 0)),
@@ -148,16 +145,7 @@ test('MethSharing',
       ],
      compile_and_run,
      ['-O'])
-test('T2902',
-     extra_clean(['T2902_A',    'T2902_B',
-                  'T2902_A.hi', 'T2902_B.hi',
-                  'T2902_A.o',  'T2902_B.o',
-                  'T2902_A_PairingSum.hi', 'T2902_B_PairingSum.hi',
-                  'T2902_A_PairingSum.o',  'T2902_B_PairingSum.o',
-                  'T2902_Sum.hi',
-                  'T2902_Sum.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T2902'])
+test('T2902', [], run_command, ['$MAKE -s --no-print-directory T2902'])
 test('T149',
      [ # expect_broken(149),
        # working (2 Jul 2013, x86-64/Linux)
@@ -444,6 +432,14 @@ test('T9339',
                       # w/o fusing last: 320005080
                       # 2014-07-22:       80050760
                       # 2016-08-17:          50728 Join points (#12988)
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T8472',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(32),    50000, 80)
+                      , (wordsize(64),    51424, 80) ]),
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])

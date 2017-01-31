@@ -383,6 +383,7 @@ basicKnownKeyNames
         , ghciIoClassName, ghciStepIoMName
 
         -- StaticPtr
+        , makeStaticName
         , staticPtrTyConName
         , staticPtrDataConName, staticPtrInfoDataConName
         , fromStaticPtrName
@@ -520,6 +521,9 @@ gHC_STACK_TYPES = mkBaseModule (fsLit "GHC.Stack.Types")
 
 gHC_STATICPTR :: Module
 gHC_STATICPTR = mkBaseModule (fsLit "GHC.StaticPtr")
+
+gHC_STATICPTR_INTERNAL :: Module
+gHC_STATICPTR_INTERNAL = mkBaseModule (fsLit "GHC.StaticPtr.Internal")
 
 gHC_FINGERPRINT_TYPE :: Module
 gHC_FINGERPRINT_TYPE = mkBaseModule (fsLit "GHC.Fingerprint.Type")
@@ -1386,6 +1390,10 @@ frontendPluginTyConName :: Name
 frontendPluginTyConName = tcQual pLUGINS (fsLit "FrontendPlugin") frontendPluginTyConKey
 
 -- Static pointers
+makeStaticName :: Name
+makeStaticName =
+    varQual gHC_STATICPTR_INTERNAL (fsLit "makeStatic") makeStaticKey
+
 staticPtrInfoTyConName :: Name
 staticPtrInfoTyConName =
     tcQual gHC_STATICPTR (fsLit "StaticPtrInfo") staticPtrInfoTyConKey
@@ -1642,12 +1650,11 @@ eitherTyConKey                          = mkPreludeTyConUnique 84
 
 -- Kind constructors
 liftedTypeKindTyConKey, tYPETyConKey,
-  unliftedTypeKindTyConKey, constraintKindTyConKey,
+  constraintKindTyConKey,
   starKindTyConKey, unicodeStarKindTyConKey, runtimeRepTyConKey,
   vecCountTyConKey, vecElemTyConKey :: Unique
 liftedTypeKindTyConKey                  = mkPreludeTyConUnique 87
 tYPETyConKey                            = mkPreludeTyConUnique 88
-unliftedTypeKindTyConKey                = mkPreludeTyConUnique 89
 constraintKindTyConKey                  = mkPreludeTyConUnique 92
 starKindTyConKey                        = mkPreludeTyConUnique 93
 unicodeStarKindTyConKey                 = mkPreludeTyConUnique 94
@@ -1761,6 +1768,9 @@ callStackTyConKey = mkPreludeTyConUnique 183
 -- Typeables
 typeRepTyConKey :: Unique
 typeRepTyConKey = mkPreludeTyConUnique 184
+
+typeSymbolAppendFamNameKey :: Unique
+typeSymbolAppendFamNameKey = mkPreludeTyConUnique 185
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
@@ -1887,25 +1897,27 @@ metaDataDataConKey                      = mkPreludeDataConUnique 68
 metaConsDataConKey                      = mkPreludeDataConUnique 69
 metaSelDataConKey                       = mkPreludeDataConUnique 70
 
-vecRepDataConKey :: Unique
+vecRepDataConKey, tupleRepDataConKey, sumRepDataConKey :: Unique
 vecRepDataConKey                        = mkPreludeDataConUnique 71
+tupleRepDataConKey                      = mkPreludeDataConUnique 72
+sumRepDataConKey                        = mkPreludeDataConUnique 73
 
 -- See Note [Wiring in RuntimeRep] in TysWiredIn
 runtimeRepSimpleDataConKeys :: [Unique]
-ptrRepLiftedDataConKey, ptrRepUnliftedDataConKey :: Unique
+liftedRepDataConKey :: Unique
 runtimeRepSimpleDataConKeys@(
-  ptrRepLiftedDataConKey : ptrRepUnliftedDataConKey : _)
-  = map mkPreludeDataConUnique [72..83]
+  liftedRepDataConKey : _)
+  = map mkPreludeDataConUnique [74..82]
 
 -- See Note [Wiring in RuntimeRep] in TysWiredIn
 -- VecCount
 vecCountDataConKeys :: [Unique]
-vecCountDataConKeys = map mkPreludeDataConUnique [84..89]
+vecCountDataConKeys = map mkPreludeDataConUnique [83..88]
 
 -- See Note [Wiring in RuntimeRep] in TysWiredIn
 -- VecElem
 vecElemDataConKeys :: [Unique]
-vecElemDataConKeys = map mkPreludeDataConUnique [90..99]
+vecElemDataConKeys = map mkPreludeDataConUnique [89..98]
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES DataUniques 100-150
@@ -2220,6 +2232,9 @@ pushCallStackKey  = mkPreludeMiscIdUnique 518
 fromStaticPtrClassOpKey :: Unique
 fromStaticPtrClassOpKey = mkPreludeMiscIdUnique 519
 
+makeStaticKey :: Unique
+makeStaticKey = mkPreludeMiscIdUnique 520
+
 {-
 ************************************************************************
 *                                                                      *
@@ -2298,5 +2313,4 @@ pretendNameIsInScope :: Name -> Bool
 pretendNameIsInScope n
   = any (n `hasKey`)
     [ starKindTyConKey, liftedTypeKindTyConKey, tYPETyConKey
-    , unliftedTypeKindTyConKey
-    , runtimeRepTyConKey, ptrRepLiftedDataConKey, ptrRepUnliftedDataConKey ]
+    , runtimeRepTyConKey, liftedRepDataConKey ]

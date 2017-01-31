@@ -30,6 +30,7 @@ import Bag
 import Literal
 import DataCon
 import TysWiredIn
+import TysPrim
 import TcType ( isFloatingTy )
 import Var
 import VarEnv
@@ -68,7 +69,6 @@ import Control.Monad
 import qualified Control.Monad.Fail as MonadFail
 #endif
 import MonadUtils
-import Data.Function (fix)
 import Data.Maybe
 import Pair
 import qualified GHC.LanguageExtensions as LangExt
@@ -414,12 +414,12 @@ lintCoreBindings dflags pass local_in_scope binds
                       _              -> True
 
     -- See Note [Checking StaticPtrs]
-    check_static_ptrs = xopt LangExt.StaticPointers dflags &&
-                        case pass of
-                          CoreDoFloatOutwards _ -> True
-                          CoreTidy              -> True
-                          CorePrep              -> True
-                          _                     -> False
+    check_static_ptrs | not (xopt LangExt.StaticPointers dflags) = AllowAnywhere
+                      | otherwise = case pass of
+                          CoreDoFloatOutwards _ -> AllowAtTopLevel
+                          CoreTidy              -> RejectEverywhere
+                          CorePrep              -> AllowAtTopLevel
+                          _                     -> AllowAnywhere
 
     binders = bindersOfBinds binds
     (_, dups) = removeDups compare binders
@@ -506,13 +506,24 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
         -- See Note [CoreSyn let/app invariant] in CoreSyn
        ; checkL (not (isUnliftedType binder_ty)
             || isJoinId binder
-            || (isNonRec rec_flag && exprOkForSpeculation rhs))
+            || (isNonRec rec_flag && exprOkForSpeculation rhs)
+            || exprIsLiteralString rhs)
            (mkRhsPrimMsg binder rhs)
 
-        -- Check that if the binder is top-level or recursive, it's not demanded
+        -- Check that if the binder is top-level or recursive, it's not
+        -- demanded. Primitive string literals are exempt as there is no
+        -- computation to perform, see Note [CoreSyn top-level string literals].
        ; checkL (not (isStrictId binder)
-            || (isNonRec rec_flag && not (isTopLevel top_lvl_flag)))
+            || (isNonRec rec_flag && not (isTopLevel top_lvl_flag))
+            || exprIsLiteralString rhs)
            (mkStrictMsg binder)
+
+        -- Check that if the binder is at the top level and has type Addr#,
+        -- that it is a string literal, see
+        -- Note [CoreSyn top-level string literals].
+       ; checkL (not (isTopLevel top_lvl_flag && binder_ty `eqType` addrPrimTy)
+                 || exprIsLiteralString rhs)
+           (mkTopNonLitStrMsg binder)
 
        ; flags <- getLintFlags
 
@@ -566,32 +577,18 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
                   | otherwise = return ()
 
 -- | Checks the RHS of bindings. It only differs from 'lintCoreExpr'
--- in that it doesn't reject applications of the data constructor @StaticPtr@
--- when they appear at the top level, and for join points, it skips the outer
--- lambdas that take arguments to the join point.
+-- in that it doesn't reject occurrences of the function 'makeStatic' when they
+-- appear at the top level and @lf_check_static_ptrs == AllowAtTopLevel@, and
+-- for join points, it skips the outer lambdas that take arguments to the
+-- join point.
 --
 -- See Note [Checking StaticPtrs].
 lintRhs :: Id -> CoreExpr -> LintM OutType
--- Allow applications of the data constructor @StaticPtr@ at the top
--- but produce errors otherwise.
 lintRhs bndr rhs
     | Just arity <- isJoinId_maybe bndr
     = lint_join_lams arity arity True rhs
     | AlwaysTailCalled arity <- tailCallInfo (idOccInfo bndr)
     = lint_join_lams arity arity False rhs
-    | (binders0, rhs') <- collectTyBinders rhs
-    , Just (fun, args) <- collectStaticPtrSatArgs rhs'
-    = markAllJoinsBad $
-      flip fix binders0 $ \loopBinders binders -> case binders of
-        -- imitate @lintCoreExpr (Lam ...)@
-        var : vars -> addLoc (LambdaBodyOf var) $
-                      lintBinder var $ \var' ->
-                      do { body_ty <- loopBinders vars
-                         ; return $ mkLamType var' body_ty }
-        -- imitate @lintCoreExpr (App ...)@
-        [] -> do
-          fun_ty <- lintCoreExpr fun
-          addLoc (AnExpr rhs') $ lintCoreArgs fun_ty args
   where
     lint_join_lams 0 _ _ rhs
       = lintCoreExpr rhs
@@ -607,8 +604,30 @@ lintRhs bndr rhs
           -- Future join point, not yet eta-expanded
           -- Body is not a tail position
 
--- Rejects applications of the data constructor @StaticPtr@ if it finds any.
-lintRhs _ rhs = markAllJoinsBad $ lintCoreExpr rhs
+-- Allow applications of the data constructor @StaticPtr@ at the top
+-- but produce errors otherwise.
+lintRhs _bndr rhs = fmap lf_check_static_ptrs getLintFlags >>= go
+  where
+    -- Allow occurrences of 'makeStatic' at the top-level but produce errors
+    -- otherwise.
+    go AllowAtTopLevel
+      | (binders0, rhs') <- collectTyBinders rhs
+      , Just (fun, t, info, e) <- collectMakeStaticArgs rhs'
+      = markAllJoinsBad $
+        foldr
+        -- imitate @lintCoreExpr (Lam ...)@
+        (\var loopBinders ->
+          addLoc (LambdaBodyOf var) $
+            lintBinder var $ \var' ->
+              do { body_ty <- loopBinders
+                 ; return $ mkLamType var' body_ty }
+        )
+        -- imitate @lintCoreExpr (App ...)@
+        (do fun_ty <- lintCoreExpr fun
+            addLoc (AnExpr rhs') $ lintCoreArgs fun_ty [Type t, info, e]
+        )
+        binders0
+    go _ = markAllJoinsBad $ lintCoreExpr rhs
 
 lintIdUnfolding :: Id -> Type -> Unfolding -> LintM ()
 lintIdUnfolding bndr bndr_ty (CoreUnfolding { uf_tmpl = rhs, uf_src = src })
@@ -801,11 +820,9 @@ lintCoreVar var nargs
         ; lf <- getLintFlags
           -- Check for a nested occurrence of the StaticPtr constructor.
           -- See Note [Checking StaticPtrs].
-        ; when (nargs /= 0 && lf_check_static_ptrs lf) $
-          case isDataConId_maybe var of
-            Just con | dataConName con == staticPtrDataConName
-              -> failWithL $ text "Found StaticPtr nested in an expression"
-            _ -> return ()
+        ; when (nargs /= 0 && lf_check_static_ptrs lf /= AllowAnywhere) $
+            checkL (idName var /= makeStaticName) $
+              text "Found makeStatic nested in an expression"
 
         ; checkDeadIdOcc var
         ; ty   <- applySubstTy (idType var)
@@ -923,6 +940,12 @@ lintCoreArg fun_ty (Type arg_ty)
 
 lintCoreArg fun_ty arg
   = do { arg_ty <- markAllJoinsBad $ lintCoreExpr arg
+           -- See Note [Levity polymorphism invariants] in CoreSyn
+       ; lintL (not (isTypeLevPoly arg_ty))
+           (text "Levity-polymorphic argument:" <+>
+             (ppr arg <+> dcolon <+> parens (ppr arg_ty <+> dcolon <+> ppr (typeKind arg_ty))))
+          -- check for levity polymorphism first, because otherwise isUnliftedType panics
+
        ; checkL (not (isUnliftedType arg_ty) || exprOkForSpeculation arg)
                 (mkLetAppMsg arg)
        ; lintValApp arg fun_ty arg_ty }
@@ -1156,10 +1179,9 @@ lintIdBndr top_lvl id linterF
            (mkNonTopExternalNameMsg id)
 
        ; (ty, k) <- lintInTy (idType id)
-
-       -- Check for levity polymorphism
-       ; lintL (not (isLevityPolymorphic k))
-           (text "RuntimeRep-polymorphic binder:" <+>
+          -- See Note [Levity polymorphism invariants] in CoreSyn
+       ; lintL (not (isKindLevPoly k))
+           (text "Levity-polymorphic binder:" <+>
                  (ppr id <+> dcolon <+> parens (ppr ty <+> dcolon <+> ppr k)))
 
        ; let id' = setIdType id ty
@@ -1213,7 +1235,7 @@ lintType ty@(TyConApp tc tys)
   = lintType ty'   -- Expand type synonyms, so that we do not bogusly complain
                    --  about un-saturated type synonyms
 
-  | isUnliftedTyCon tc || isTypeSynonymTyCon tc || isTypeFamilyTyCon tc
+  | isTypeSynonymTyCon tc || isTypeFamilyTyCon tc
        -- Also type synonyms and type families
   , length tys < tyConArity tc
   = failWithL (hang (text "Un-saturated type application") 2 (ppr ty))
@@ -1256,7 +1278,7 @@ lintKind :: OutKind -> LintM ()
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintKind k = do { sk <- lintType k
-                ; unless ((isStarKind sk) || (isUnliftedTypeKind sk))
+                ; unless (classifiesTypeWithValues sk)
                          (addErrL (hang (text "Ill-kinded kind:" <+> ppr k)
                                       2 (text "has kind:" <+> ppr sk))) }
 
@@ -1552,15 +1574,17 @@ lintCoercion co@(UnivCo prov r ty1 ty2)
                      2 (vcat [ text "From:" <+> ppr ty1
                              , text "  To:" <+> ppr ty2])
      isUnBoxed :: PrimRep -> Bool
-     isUnBoxed PtrRep = False
-     isUnBoxed _      = True
+     isUnBoxed = not . isGcPtrRep
+
+       -- see #9122 for discussion of these checks
      checkTypes t1 t2
-       = case (repType t1, repType t2) of
-           (UnaryRep _, UnaryRep _) ->
-              validateCoercion (typePrimRep t1) (typePrimRep t2)
-           (MultiRep rep1, MultiRep rep2) ->
-              checkWarnL (rep1 == rep2) (report "multi values with different reps")
-           _  -> addWarnL (report "multi rep and unary rep")
+       = do { checkWarnL (reps1 `equalLength` reps2)
+                         (report "values with different # of reps")
+            ; zipWithM_ validateCoercion reps1 reps2 }
+       where
+         reps1 = typePrimRep t1
+         reps2 = typePrimRep t2
+
      validateCoercion :: PrimRep -> PrimRep -> LintM ()
      validateCoercion rep1 rep2
        = do { dflags <- getDynFlags
@@ -1767,13 +1791,24 @@ data LintEnv
 data LintFlags
   = LF { lf_check_global_ids           :: Bool -- See Note [Checking for global Ids]
        , lf_check_inline_loop_breakers :: Bool -- See Note [Checking for INLINE loop breakers]
-       , lf_check_static_ptrs          :: Bool -- See Note [Checking StaticPtrs]
+       , lf_check_static_ptrs          :: StaticPtrCheck
+                                             -- ^ See Note [Checking StaticPtrs]
     }
+
+-- See Note [Checking StaticPtrs]
+data StaticPtrCheck
+    = AllowAnywhere
+        -- ^ Allow 'makeStatic' to occur anywhere.
+    | AllowAtTopLevel
+        -- ^ Allow 'makeStatic' calls at the top-level only.
+    | RejectEverywhere
+        -- ^ Reject any 'makeStatic' occurrence.
+  deriving Eq
 
 defaultLintFlags :: LintFlags
 defaultLintFlags = LF { lf_check_global_ids = False
                       , lf_check_inline_loop_breakers = True
-                      , lf_check_static_ptrs = False
+                      , lf_check_static_ptrs = AllowAnywhere
                       }
 
 newtype LintM a =
@@ -1791,32 +1826,19 @@ top-level ones. See Note [Exported LocalIds] and Trac #9857.
 
 Note [Checking StaticPtrs]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
-See SimplCore Note [Grand plan for static forms] for an overview.
+See Note [Grand plan for static forms] in StaticPtrTable for an overview.
 
-Every occurrence of the data constructor @StaticPtr@ should be moved
-to the top level by the FloatOut pass.  It's vital that we don't have
-nested StaticPtr uses after CorePrep, because we populate the Static
+Every occurrence of the function 'makeStatic' should be moved to the
+top level by the FloatOut pass.  It's vital that we don't have nested
+'makeStatic' occurrences after CorePrep, because we populate the Static
 Pointer Table from the top-level bindings. See SimplCore Note [Grand
 plan for static forms].
 
 The linter checks that no occurrence is left behind, nested within an
-expression. The check is enabled only:
-
-* After the FloatOut, CorePrep, and CoreTidy passes.
-  We could check more often, but the condition doesn't hold until
-  after the first FloatOut pass.
-
-* When the module uses the StaticPointers language extension. This is
-  a little hack.  This optimization arose from the need to compile
-  GHC.StaticPtr, which otherwise would be rejected because of the
-  following binding for the StaticPtr data constructor itself:
-
-    StaticPtr = \a b1 b2 b3 b4 -> StaticPtr a b1 b2 b3 b4
-
-  which contains an application of `StaticPtr` nested within the
-  lambda abstractions.  This binding is injected by CorePrep.
-
-  Note that GHC.StaticPtr is itself compiled without -XStaticPointers.
+expression. The check is enabled only after the FloatOut, CorePrep,
+and CoreTidy passes and only if the module uses the StaticPointers
+language extension. Checking more often doesn't help since the condition
+doesn't hold until after the first FloatOut pass.
 
 Note [Type substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2207,6 +2229,10 @@ mkNonTopExportedMsg binder
 mkNonTopExternalNameMsg :: Id -> MsgDoc
 mkNonTopExternalNameMsg binder
   = hsep [text "Non-top-level binder has an external name:", ppr binder]
+
+mkTopNonLitStrMsg :: Id -> MsgDoc
+mkTopNonLitStrMsg binder
+  = hsep [text "Top-level Addr# binder has a non-literal rhs:", ppr binder]
 
 mkKindErrMsg :: TyVar -> Type -> MsgDoc
 mkKindErrMsg tyvar arg_ty

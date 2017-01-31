@@ -51,11 +51,11 @@ AC_CHECK_FUNCS([epoll_ctl eventfd kevent kevent64 kqueue poll])
 
 # event-related fun
 
-if test "$ac_cv_header_sys_epoll_h" = yes -a "$ac_cv_func_epoll_ctl" = yes; then
+if test "$ac_cv_header_sys_epoll_h" = yes && test "$ac_cv_func_epoll_ctl" = yes; then
   AC_DEFINE([HAVE_EPOLL], [1], [Define if you have epoll support.])
 fi
 
-if test "$ac_cv_header_sys_event_h" = yes -a "$ac_cv_func_kqueue" = yes; then
+if test "$ac_cv_header_sys_event_h" = yes && test "$ac_cv_func_kqueue" = yes; then
   AC_DEFINE([HAVE_KQUEUE], [1], [Define if you have kqueue support.])
 
   AC_CHECK_SIZEOF([kev.filter], [], [#include <sys/event.h>
@@ -65,7 +65,7 @@ struct kevent kev;])
 struct kevent kev;])
 fi
 
-if test "$ac_cv_header_poll_h" = yes -a "$ac_cv_func_poll" = yes; then
+if test "$ac_cv_header_poll_h" = yes && test "$ac_cv_func_poll" = yes; then
   AC_DEFINE([HAVE_POLL], [1], [Define if you have poll support.])
 fi
 
@@ -118,6 +118,7 @@ if test "$ac_cv_type_long_long" = yes; then
 FPTOOLS_CHECK_HTYPE(long long)
 FPTOOLS_CHECK_HTYPE(unsigned long long)
 fi
+FPTOOLS_CHECK_HTYPE(bool)
 FPTOOLS_CHECK_HTYPE(float)
 FPTOOLS_CHECK_HTYPE(double)
 FPTOOLS_CHECK_HTYPE(ptrdiff_t)
@@ -155,6 +156,7 @@ FPTOOLS_CHECK_HTYPE(fsblkcnt_t)
 FPTOOLS_CHECK_HTYPE(fsfilcnt_t)
 FPTOOLS_CHECK_HTYPE(id_t)
 FPTOOLS_CHECK_HTYPE(key_t)
+FPTOOLS_CHECK_HTYPE(timer_t)
 
 FPTOOLS_CHECK_HTYPE(intptr_t)
 FPTOOLS_CHECK_HTYPE(uintptr_t)

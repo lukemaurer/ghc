@@ -1236,7 +1236,7 @@ binders the CPR property.  Specifically
                    | otherwise = x
 
    For $wf2 we are going to unbox the MkT *and*, since it is strict, the
-   first agument of the MkT; see Note [Add demands for strict constructors].
+   first argument of the MkT; see Note [Add demands for strict constructors].
    But then we don't want box it up again when returning it!  We want
    'f2' to have the CPR property, so we give 'x' the CPR property.
 
@@ -1247,7 +1247,7 @@ binders the CPR property.  Specifically
               MkT x y | y>0       -> ...
                       | otherwise -> x
    Here we don't have the unboxed 'x' available.  Hence the
-   is_var_scrut test when making use of the strictness annoatation.
+   is_var_scrut test when making use of the strictness annotation.
    Slightly ad-hoc, because even if the scrutinee *is* a variable it
    might not be a onre of the arguments to the original function, or a
    sub-component thereof.  But it's simple, and nothing terrible

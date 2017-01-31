@@ -133,7 +133,8 @@ tcRnExports explicit_mod exports
                  | explicit_mod = exports
                  | ghcLink dflags == LinkInMemory = Nothing
                  | otherwise
-                          = Just (noLoc [noLoc (IEVar (noLoc main_RDR_Unqual))])
+                          = Just (noLoc [noLoc
+                              (IEVar (noLoc (IEName $ noLoc main_RDR_Unqual)))])
                         -- ToDo: the 'noLoc' here is unhelpful if 'main'
                         --       turns out to be out of scope
 
@@ -267,18 +268,19 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
     -------------
     lookup_ie :: IE RdrName -> RnM (IE Name, AvailInfo)
     lookup_ie (IEVar (L l rdr))
-        = do (name, avail) <- lookupGreAvailRn rdr
-             return (IEVar (L l name), avail)
+        = do (name, avail) <- lookupGreAvailRn $ ieWrappedName rdr
+             return (IEVar (L l (replaceWrappedName rdr name)), avail)
 
     lookup_ie (IEThingAbs (L l rdr))
-        = do (name, avail) <- lookupGreAvailRn rdr
-             return (IEThingAbs (L l name), avail)
+        = do (name, avail) <- lookupGreAvailRn $ ieWrappedName rdr
+             return (IEThingAbs (L l (replaceWrappedName rdr name)), avail)
 
-    lookup_ie ie@(IEThingAll n)
+    lookup_ie ie@(IEThingAll n')
         = do
-            (n, avail, flds) <- lookup_ie_all ie n
+            (n, avail, flds) <- lookup_ie_all ie n'
             let name = unLoc n
-            return (IEThingAll n, AvailTC name (name:avail) flds)
+            return (IEThingAll (replaceLWrappedName n' (unLoc n))
+                   , AvailTC name (name:avail) flds)
 
 
     lookup_ie ie@(IEThingWith l wc sub_rdrs _)
@@ -290,7 +292,9 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
                 NoIEWildcard -> return (lname, [], [])
                 IEWildcard _ -> lookup_ie_all ie l
             let name = unLoc lname
-            return (IEThingWith lname wc subs (map noLoc (flds ++ all_flds)),
+                subs' = map (replaceLWrappedName l . unLoc) subs
+            return (IEThingWith (replaceLWrappedName l name) wc subs'
+                                (map noLoc (flds ++ all_flds)),
                     AvailTC name (name : avails ++ all_avail)
                                  (flds ++ all_flds))
 
@@ -299,23 +303,24 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
 
     lookup_ie _ = panic "lookup_ie"    -- Other cases covered earlier
 
-    lookup_ie_with :: Located RdrName -> [Located RdrName]
+    lookup_ie_with :: LIEWrappedName RdrName -> [LIEWrappedName RdrName]
                    -> RnM (Located Name, [Located Name], [Name], [FieldLabel])
     lookup_ie_with (L l rdr) sub_rdrs
-        = do name <- lookupGlobalOccRn rdr
-             (non_flds, flds) <- lookupChildrenExport name sub_rdrs
+        = do name <- lookupGlobalOccRn $ ieWrappedName rdr
+             (non_flds, flds) <- lookupChildrenExport name
+                                                  (map ieLWrappedName sub_rdrs)
              if isUnboundName name
                 then return (L l name, [], [name], [])
                 else return (L l name, non_flds
                             , map unLoc non_flds
                             , map unLoc flds)
-    lookup_ie_all :: IE RdrName -> Located RdrName
+    lookup_ie_all :: IE RdrName -> LIEWrappedName RdrName
                   -> RnM (Located Name, [Name], [FieldLabel])
     lookup_ie_all ie (L l rdr) =
-          do name <- lookupGlobalOccRn rdr
+          do name <- lookupGlobalOccRn $ ieWrappedName rdr
              let gres = findChildren kids_env name
                  (non_flds, flds) = classifyGREs gres
-             addUsedKids rdr gres
+             addUsedKids (ieWrappedName rdr) gres
              warnDodgyExports <- woptM Opt_WarnDodgyExports
              when (null gres) $
                   if isTyConName name
@@ -403,7 +408,7 @@ instance Outputable ChildLookupResult where
   ppr (FoundFL fls) = text "FoundFL:" <+> ppr fls
   ppr (NameErr _) = text "Error"
 
--- Left biased accumulation monoid. Chooses the left-most positive occurence.
+-- Left biased accumulation monoid. Chooses the left-most positive occurrence.
 instance Monoid ChildLookupResult where
   mempty = NameNotFound
   NameNotFound `mappend` m2 = m2
@@ -476,13 +481,13 @@ lookupExportChild parent rdr_name
   -- `checkPatSynParent`.
   traceRn "lookupExportChild original_gres:" (ppr original_gres)
   case picked_gres original_gres of
-    NoOccurence ->
+    NoOccurrence ->
       noMatchingParentErr original_gres
-    UniqueOccurence g ->
+    UniqueOccurrence g ->
       checkPatSynParent parent (gre_name g)
-    DisambiguatedOccurence g ->
+    DisambiguatedOccurrence g ->
       checkFld g
-    AmbiguousOccurence gres ->
+    AmbiguousOccurrence gres ->
       mkNameClashErr gres
     where
         -- Convert into FieldLabel if necessary
@@ -547,42 +552,42 @@ lookupExportChild parent rdr_name
         right_parent p
           | Just cur_parent <- getParent p
             = if parent == cur_parent
-                then DisambiguatedOccurence p
-                else NoOccurence
+                then DisambiguatedOccurrence p
+                else NoOccurrence
           | otherwise
-            = UniqueOccurence p
+            = UniqueOccurrence p
 
 -- This domain specific datatype is used to record why we decided it was
 -- possible that a GRE could be exported with a parent.
 data DisambigInfo
-       = NoOccurence
+       = NoOccurrence
           -- The GRE could never be exported. It has the wrong parent.
-       | UniqueOccurence GlobalRdrElt
+       | UniqueOccurrence GlobalRdrElt
           -- The GRE has no parent. It could be a pattern synonym.
-       | DisambiguatedOccurence GlobalRdrElt
+       | DisambiguatedOccurrence GlobalRdrElt
           -- The parent of the GRE is the correct parent
-       | AmbiguousOccurence [GlobalRdrElt]
+       | AmbiguousOccurrence [GlobalRdrElt]
           -- For example, two normal identifiers with the same name are in
-          -- scope. They will both be resolved to "UniqueOccurence" and the
+          -- scope. They will both be resolved to "UniqueOccurrence" and the
           -- monoid will combine them to this failing case.
 
 instance Monoid DisambigInfo where
-  mempty = NoOccurence
-  -- This is the key line: We prefer disambiguated occurences to other
+  mempty = NoOccurrence
+  -- This is the key line: We prefer disambiguated occurrences to other
   -- names.
-  UniqueOccurence _ `mappend` DisambiguatedOccurence g' = DisambiguatedOccurence g'
-  DisambiguatedOccurence g' `mappend` UniqueOccurence _ = DisambiguatedOccurence g'
+  UniqueOccurrence _ `mappend` DisambiguatedOccurrence g' = DisambiguatedOccurrence g'
+  DisambiguatedOccurrence g' `mappend` UniqueOccurrence _ = DisambiguatedOccurrence g'
 
 
-  NoOccurence `mappend` m = m
-  m `mappend` NoOccurence = m
-  UniqueOccurence g `mappend` UniqueOccurence g' = AmbiguousOccurence [g, g']
-  UniqueOccurence g `mappend` AmbiguousOccurence gs = AmbiguousOccurence (g:gs)
-  DisambiguatedOccurence g `mappend` DisambiguatedOccurence g'  = AmbiguousOccurence [g, g']
-  DisambiguatedOccurence g `mappend` AmbiguousOccurence gs = AmbiguousOccurence (g:gs)
-  AmbiguousOccurence gs `mappend` UniqueOccurence g' = AmbiguousOccurence (g':gs)
-  AmbiguousOccurence gs `mappend` DisambiguatedOccurence g' = AmbiguousOccurence (g':gs)
-  AmbiguousOccurence gs `mappend` AmbiguousOccurence gs' = AmbiguousOccurence (gs ++ gs')
+  NoOccurrence `mappend` m = m
+  m `mappend` NoOccurrence = m
+  UniqueOccurrence g `mappend` UniqueOccurrence g' = AmbiguousOccurrence [g, g']
+  UniqueOccurrence g `mappend` AmbiguousOccurrence gs = AmbiguousOccurrence (g:gs)
+  DisambiguatedOccurrence g `mappend` DisambiguatedOccurrence g'  = AmbiguousOccurrence [g, g']
+  DisambiguatedOccurrence g `mappend` AmbiguousOccurrence gs = AmbiguousOccurrence (g:gs)
+  AmbiguousOccurrence gs `mappend` UniqueOccurrence g' = AmbiguousOccurrence (g':gs)
+  AmbiguousOccurrence gs `mappend` DisambiguatedOccurrence g' = AmbiguousOccurrence (g':gs)
+  AmbiguousOccurrence gs `mappend` AmbiguousOccurrence gs' = AmbiguousOccurrence (gs ++ gs')
 
 
 
@@ -765,8 +770,9 @@ dupExport_ok n ie1 ie2
   = not (  single ie1 || single ie2
         || (explicit_in ie1 && explicit_in ie2) )
   where
-    explicit_in (IEModuleContents _) = False                -- module M
-    explicit_in (IEThingAll r) = nameOccName n == rdrNameOcc (unLoc r)  -- T(..)
+    explicit_in (IEModuleContents _) = False                   -- module M
+    explicit_in (IEThingAll r)
+      = nameOccName n == rdrNameOcc (ieWrappedName $ unLoc r)  -- T(..)
     explicit_in _              = True
 
     single IEVar {}      = True

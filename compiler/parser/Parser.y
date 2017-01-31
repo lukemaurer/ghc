@@ -441,6 +441,7 @@ are the most common patterns, rewritten as regular expressions for clarity:
  '{-# OVERLAPPABLE'       { L _ (IToverlappable_prag _) }
  '{-# OVERLAPS'           { L _ (IToverlaps_prag _) }
  '{-# INCOHERENT'         { L _ (ITincoherent_prag _) }
+ '{-# COMPLETE'           { L _ (ITcomplete_prag _)   }
  '#-}'                    { L _ ITclose_prag }
 
  '..'           { L _ ITdotdot }                        -- reserved symbols
@@ -792,7 +793,7 @@ export  :: { OrdList (LIE RdrName) }
                                           >>= \ie -> amsu (sLL $1 $> ie) (fst $ unLoc $2) }
         |  'module' modid            {% amsu (sLL $1 $> (IEModuleContents $2))
                                              [mj AnnModule $1] }
-        |  'pattern' qcon            {% amsu (sLL $1 $> (IEVar $2))
+        |  'pattern' qcon            {% amsu (sLL $1 $> (IEVar (sLL $1 $> (IEPattern $2))))
                                              [mj AnnPattern $1] }
 
 export_subspec :: { Located ([AddAnn],ImpExpSubSpec) }
@@ -802,13 +803,13 @@ export_subspec :: { Located ([AddAnn],ImpExpSubSpec) }
                                             (as ++ [mop $1,mcp $3] ++ fst $2, ie) }
 
 
-qcnames :: { ([AddAnn], [Located (Maybe RdrName)]) }
+qcnames :: { ([AddAnn], [Located ImpExpQcSpec]) }
   : {- empty -}                   { ([],[]) }
   | qcnames1                      { $1 }
 
-qcnames1 :: { ([AddAnn], [Located (Maybe RdrName)]) }     -- A reversed list
+qcnames1 :: { ([AddAnn], [Located ImpExpQcSpec]) }     -- A reversed list
         :  qcnames1 ',' qcname_ext_w_wildcard  {% case (head (snd $1)) of
-                                                    l@(L _ Nothing) ->
+                                                    l@(L _ ImpExpQcWildcard) ->
                                                        return ([mj AnnComma $2, mj AnnDotdot l]
                                                                ,(snd (unLoc $3)  : snd $1))
                                                     l -> (ams (head (snd $1)) [mj AnnComma $2] >>
@@ -821,14 +822,15 @@ qcnames1 :: { ([AddAnn], [Located (Maybe RdrName)]) }     -- A reversed list
 
 -- Variable, data constructor or wildcard
 -- or tagged type constructor
-qcname_ext_w_wildcard :: { Located ([AddAnn],Located (Maybe RdrName)) }
-        :  qcname_ext               { sL1 $1 ([],Just `fmap` $1) }
-        |  '..'                     { sL1 $1 ([mj AnnDotdot $1], sL1 $1 Nothing) }
+qcname_ext_w_wildcard :: { Located ([AddAnn], Located ImpExpQcSpec) }
+        :  qcname_ext               { sL1 $1 ([],$1) }
+        |  '..'                     { sL1 $1 ([mj AnnDotdot $1], sL1 $1 ImpExpQcWildcard)  }
 
-qcname_ext :: { Located RdrName }
-        :  qcname                   { $1 }
-        |  'type' oqtycon           {% amms (mkTypeImpExp (sLL $1 $> (unLoc $2)))
-                                            [mj AnnType $1,mj AnnVal $2] }
+qcname_ext :: { Located ImpExpQcSpec }
+        :  qcname                   { sL1 $1 (ImpExpQcName $1) }
+        |  'type' oqtycon           {% do { n <- mkTypeImpExp $2
+                                          ; ams (sLL $1 $> (ImpExpQcType n))
+                                                [mj AnnType $1] } }
 
 qcname  :: { Located RdrName }  -- Variable or type constructor
         :  qvar                 { $1 } -- Things which look like functions
@@ -1672,6 +1674,10 @@ opt_asig :: { ([AddAnn],Maybe (LHsType RdrName)) }
         : {- empty -}                   { ([],Nothing) }
         | '::' atype                    { ([mu AnnDcolon $1],Just $2) }
 
+opt_tyconsig :: { ([AddAnn], Maybe (Located RdrName)) }
+             : {- empty -}              { ([], Nothing) }
+             | '::' gtycon              { ([mu AnnDcolon $1], Just $2) }
+
 sigtype :: { LHsType RdrName }
         : ctype                            { $1 }
 
@@ -2248,6 +2254,13 @@ sigdecl :: { LHsDecl RdrName }
 
         | pattern_synonym_sig   { sLL $1 $> . SigD . unLoc $ $1 }
 
+        | '{-# COMPLETE' con_list opt_tyconsig  '#-}'
+                {% let (dcolon, tc) = $3
+                   in ams
+                       (sLL $1 $>
+                         (SigD (CompleteMatchSig (getCOMPLETE_PRAGs $1) $2 tc)))
+                    ([ mo $1 ] ++ dcolon ++ [mc $4]) }
+
         -- This rule is for both INLINE and INLINABLE pragmas
         | '{-# INLINE' activation qvar '#-}'
                 {% ams ((sLL $1 $> $ SigD (InlineSig $3
@@ -2488,14 +2501,14 @@ aexp2   :: { LHsExpr RdrName }
         -- correct Haskell (you'd have to write '((+ 3), (4 -))')
         -- but the less cluttered version fell out of having texps.
         | '(' texp ')'                  {% ams (sLL $1 $> (HsPar $2)) [mop $1,mcp $3] }
-        | '(' tup_exprs ')'             {% do { e <- mkSumOrTuple Boxed (comb2 $1 $3) $2
-                                              ; ams (sLL $1 $> e) [mop $1,mcp $3] } }
+        | '(' tup_exprs ')'             {% do { e <- mkSumOrTuple Boxed (comb2 $1 $3) (snd $2)
+                                              ; ams (sLL $1 $> e) ((mop $1:fst $2) ++ [mcp $3]) } }
 
         | '(#' texp '#)'                {% ams (sLL $1 $> (ExplicitTuple [L (gl $2)
                                                          (Present $2)] Unboxed))
                                                [mo $1,mc $3] }
-        | '(#' tup_exprs '#)'           {% do { e <- mkSumOrTuple Unboxed (comb2 $1 $3) $2
-                                              ; ams (sLL $1 $> e) [mo $1,mc $3] } }
+        | '(#' tup_exprs '#)'           {% do { e <- mkSumOrTuple Unboxed (comb2 $1 $3) (snd $2)
+                                              ; ams (sLL $1 $> e) ((mo $1:fst $2) ++ [mc $3]) } }
 
         | '[' list ']'      {% ams (sLL $1 $> (snd $2)) (mos $1:mcs $3:(fst $2)) }
         | '[:' parr ':]'    {% ams (sLL $1 $> (snd $2)) (mo $1:mc $3:(fst $2)) }
@@ -2584,24 +2597,20 @@ texp :: { LHsExpr RdrName }
         | exp '->' texp   {% ams (sLL $1 $> $ EViewPat $1 $3) [mu AnnRarrow $2] }
 
 -- Always at least one comma or bar.
-tup_exprs :: { SumOrTuple }
+tup_exprs :: { ([AddAnn],SumOrTuple) }
            : texp commas_tup_tail
                           {% do { addAnnotation (gl $1) AnnComma (fst $2)
-                                ; return (Tuple ((sL1 $1 (Present $1)) : snd $2)) } }
+                                ; return ([],Tuple ((sL1 $1 (Present $1)) : snd $2)) } }
 
-           | texp bars
-                          {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $2)
-                                ; return (Sum 1  (snd $2 + 1) $1) } }
+           | texp bars    { (mvbars (fst $2), Sum 1  (snd $2 + 1) $1) }
 
            | commas tup_tail
                 {% do { mapM_ (\ll -> addAnnotation ll AnnComma ll) (fst $1)
                       ; return
-                           (Tuple (map (\l -> L l missingTupArg) (fst $1) ++ $2)) } }
+                           ([],Tuple (map (\l -> L l missingTupArg) (fst $1) ++ $2)) } }
 
            | bars texp bars0
-                {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $1)
-                      ; mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $3)
-                      ; return (Sum (snd $1 + 1) (snd $1 + snd $3 + 1) $2) } }
+                { (mvbars (fst $1) ++ mvbars (fst $3), Sum (snd $1 + 1) (snd $1 + snd $3 + 1) $2) }
 
 -- Always starts with commas; always follows an expr
 commas_tup_tail :: { (SrcSpan,[LHsTupArg RdrName]) }
@@ -3397,6 +3406,7 @@ getTH_ID_TY_SPLICE (L _ (ITidTyEscape x)) = x
 getINLINE       (L _ (ITinline_prag _ inl conl)) = (inl,conl)
 getSPEC_INLINE  (L _ (ITspec_inline_prag _ True))  = (Inline,  FunLike)
 getSPEC_INLINE  (L _ (ITspec_inline_prag _ False)) = (NoInline,FunLike)
+getCOMPLETE_PRAGs (L _ (ITcomplete_prag x)) = x
 
 getDOCNEXT (L _ (ITdocCommentNext x)) = x
 getDOCPREV (L _ (ITdocCommentPrev x)) = x
@@ -3669,6 +3679,11 @@ mcs ll = mj AnnCloseS ll
 --  entry for each SrcSpan
 mcommas :: [SrcSpan] -> [AddAnn]
 mcommas ss = map (\s -> mj AnnCommaTuple (L s ())) ss
+
+-- |Given a list of the locations of '|'s, provide a [AddAnn] with an AnnVbar
+--  entry for each SrcSpan
+mvbars :: [SrcSpan] -> [AddAnn]
+mvbars ss = map (\s -> mj AnnVbar (L s ())) ss
 
 -- |Get the location of the last element of a OrdList, or noSrcSpan
 oll :: OrdList (Located a) -> SrcSpan

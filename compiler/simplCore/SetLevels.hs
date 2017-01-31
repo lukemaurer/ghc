@@ -65,8 +65,10 @@ module SetLevels (
 import CoreSyn
 import CoreMonad        ( FloatOutSwitches(..) )
 import CoreUtils        ( exprType
+                        , isExprLevPoly
                         , exprOkForSpeculation
-                        , collectStaticPtrSatArgs
+                        , exprIsTopLevelBindable
+                        , collectMakeStaticArgs
                         )
 import CoreArity        ( exprBotStrictness_maybe )
 import CoreFVs          -- all of it
@@ -83,7 +85,6 @@ import Demand           ( StrictSig, increaseStrictSigArity )
 import Name             ( getOccName, mkSystemVarName )
 import OccName          ( occNameString )
 import Type             ( isUnliftedType, Type, mkLamTypes, splitTyConApp_maybe )
-import Kind             ( isLevityPolymorphic, typeKind )
 import BasicTypes       ( Arity, RecFlag(..), isRec )
 import DataCon          ( dataConOrigResTy )
 import TysWiredIn
@@ -527,7 +528,7 @@ lvlMFE strict_ctxt env ann_expr
   |  floatTopLvlOnly env && not (isTopLvl dest_lvl)
          -- Only floating to the top level is allowed.
   || isTopLvl dest_lvl && need_join -- Can't put join point at top level
-  || isLevityPolymorphic (typeKind expr_ty)
+  || isExprLevPoly expr
          -- We can't let-bind levity polymorphic expressions
          -- See Note [Levity polymorphism invariants] in CoreSyn
   || notWorthFloating expr abs_vars
@@ -536,7 +537,7 @@ lvlMFE strict_ctxt env ann_expr
     lvlExpr env ann_expr
 
   | Just (wrap_float, wrap_use)
-       <- canFloat_maybe rhs_env strict_ctxt (float_is_lam || need_join) expr_ty
+       <- canFloat_maybe rhs_env strict_ctxt (float_is_lam || need_join) expr
   = do { expr1 <- if need_join then lvlExpr rhs_env ann_expr
                                else lvlNonTailExpr rhs_env ann_expr
        ; let abs_expr = mkLams abs_vars_w_lvls (wrap_float expr1)
@@ -550,7 +551,6 @@ lvlMFE strict_ctxt env ann_expr
 
   where
     expr         = deAnnotate ann_expr
-    expr_ty      = exprType expr
     fvs          = freeVarsOf ann_expr
     is_bot       = isJust mb_bot_str
     mb_bot_str   = exprBotStrictness_maybe expr
@@ -600,12 +600,12 @@ lvlNonTailMFE strict_ctxt env ann_expr
 canFloat_maybe :: LevelEnv
                -> Bool      -- Strict context
                -> Bool      -- The float has a value lambda
-               -> Type
+               -> CoreExpr
                -> Maybe ( LevelledExpr -> LevelledExpr   -- Wrep the flaot
                         , LevelledExpr -> LevelledExpr)  -- Wrap the use
 -- See Note [Floating MFEs of unlifted type]
-canFloat_maybe env strict_ctxt float_is_lam expr_ty
-  | float_is_lam || not (isUnliftedType expr_ty)
+canFloat_maybe env strict_ctxt float_is_lam expr
+  | float_is_lam || exprIsTopLevelBindable expr
   = Just (id, id) -- No wrapping needed if the type is lifted, or
                   -- if we are wrapping it in one or more value lambdas
                   -- or making it a join point
@@ -625,6 +625,7 @@ canFloat_maybe env strict_ctxt float_is_lam expr_ty
 
   | otherwise          -- e.g. do not float unboxed tuples
   = Nothing
+  where expr_ty = exprType expr
 
 {- Note [Floating MFEs of unlifted type]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1394,8 +1395,8 @@ newLvlVar lvld_rhs join_arity_maybe
     rhs_ty        = exprType de_tagged_rhs
 
     mk_id uniq rhs_ty
-      -- See Note [Grand plan for static forms] in SimplCore.
-      | isJust $ collectStaticPtrSatArgs $ snd $
+      -- See Note [Grand plan for static forms] in StaticPtrTable.
+      | isJust $ collectMakeStaticArgs $ snd $
         collectTyBinders de_tagged_rhs
       = mkExportedVanillaId (mkSystemVarName uniq (mkFastString "static_ptr"))
                             rhs_ty

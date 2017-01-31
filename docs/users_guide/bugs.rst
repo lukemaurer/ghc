@@ -472,7 +472,7 @@ Bugs in GHC
    .. code-block:: none
 
        ghc: panic! (the 'impossible' happened)
-         (GHC version 7.10.1 for x86_64-unknown-linux):
+         (GHC version 8.2.1 for x86_64-unknown-linux):
            Simplifier ticks exhausted
          When trying UnfoldingDone x_alB
          To increase the limit, use -fsimpl-tick-factor=N (default 100)
@@ -539,6 +539,9 @@ Bugs in GHC
 -  Despite appearances ``*`` and ``Constraint`` aren't really distinct kinds
    in the compiler's internal representation and can be unified producing
    unexpected results. See :ghc-ticket:`11715` for one example.
+
+-  Because of a toolchain limitation we are unable to support full Unicode paths
+   on Windows. On Windows we support up to Latin-1. See :ghc-ticket:`12971` for more.
 
 .. _bugs-ghci:
 

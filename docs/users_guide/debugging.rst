@@ -38,6 +38,10 @@ Dumping out compiler intermediate structures
 
         Dump parser output
 
+    .. ghc-flag:: -ddump-parsed-ast
+
+        Dump parser output as a syntax tree
+
     .. ghc-flag:: -ddump-rn
 
         Dump renamer output
@@ -166,6 +170,12 @@ Dumping out compiler intermediate structures
 
         dump foreign export stubs
 
+    .. ghc-flag:: -ddump-json
+
+         Dump error messages as JSON documents. This is intended to be consumed
+         by external tooling. A good way to use it is in conjunction with
+         :ghc-flag:`-ddump-to-file`.
+
 .. ghc-flag:: -ddump-simpl-iterations
 
     Show the output of each *iteration* of the simplifier (each run of
@@ -246,6 +256,11 @@ Dumping out compiler intermediate structures
     attached (so you can check for things that look the same but
     aren't). This flag makes debugging output appear in the more verbose
     debug style.
+
+.. ghc-flag:: -dppr-ticks
+
+    Includes "ticks" in the pretty-printer output.
+
 
 .. _formatting dumps:
 

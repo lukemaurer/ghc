@@ -1056,15 +1056,14 @@ AC_SUBST([LdHasBuildId])
 # -----------------
 # Sets the output variable LdIsGNULd to YES or NO, depending on whether it is
 # GNU ld or not.
-AC_DEFUN([FP_PROG_LD_IS_GNU],
-[
+AC_DEFUN([FP_PROG_LD_IS_GNU],[
 AC_CACHE_CHECK([whether ld is GNU ld], [fp_cv_gnu_ld],
-[if ${LdCmd} --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
-  fp_cv_gnu_ld=yes
+[[if ${LdCmd} --version 2> /dev/null | grep "GNU" > /dev/null 2>&1; then
+  fp_cv_gnu_ld=YES
 else
-  fp_cv_gnu_ld=no
-fi])
-AC_SUBST([LdIsGNULd], [`echo $fp_cv_gnu_ld | sed 'y/yesno/YESNO/'`])
+  fp_cv_gnu_ld=NO
+fi]])
+AC_SUBST([LdIsGNULd],["$fp_cv_gnu_ld"])
 ])# FP_PROG_LD_IS_GNU
 
 
@@ -2135,7 +2134,7 @@ AC_DEFUN([MAYBE_OVERRIDE_STAGE0],[
 # sets CPP command and its arguments
 #
 # $1 = the variable to set to CPP command
-# $2 = the varibale to set to CPP command arguments
+# $2 = the variable to set to CPP command arguments
 
 AC_DEFUN([FP_CPP_CMD_WITH_ARGS],[
 dnl ** what cpp to use?

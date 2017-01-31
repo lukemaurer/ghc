@@ -539,24 +539,50 @@ isMaxBound _      (MachWord64 i) = i == toInteger (maxBound :: Word64)
 isMaxBound _      _              = False
 
 
--- Note that we *don't* warn the user about overflow. It's not done at
--- runtime either, and compilation of completely harmless things like
+-- Note [Word/Int underflow/overflow]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- According to the Haskell Report 2010 (Sections 18.1 and 23.1 about signed and
+-- unsigned integral types): "All arithmetic is performed modulo 2^n, where n is
+-- the number of bits in the type."
+--
+-- GHC stores Word# and Int# constant values as Integer. Core optimizations such
+-- as constant folding must ensure that the Integer value remains in the valid
+-- target Word/Int range (see #13172). The following functions are used to
+-- ensure this.
+--
+-- Note that we *don't* warn the user about overflow. It's not done at runtime
+-- either, and compilation of completely harmless things like
 --    ((124076834 :: Word32) + (2147483647 :: Word32))
--- would yield a warning. Instead we simply squash the value into the
--- *target* Int/Word range.
-intResult :: DynFlags -> Integer -> Maybe CoreExpr
-intResult dflags result = Just (mkIntVal dflags result')
-    where result' = case platformWordSize (targetPlatform dflags) of
-                    4 -> toInteger (fromInteger result :: Int32)
-                    8 -> toInteger (fromInteger result :: Int64)
-                    w -> panic ("intResult: Unknown platformWordSize: " ++ show w)
+-- doesn't yield a warning. Instead we simply squash the value into the *target*
+-- Int/Word range.
 
+-- | Ensure the given Integer is in the target Int range
+intResult' :: DynFlags -> Integer -> Integer
+intResult' dflags result = case platformWordSize (targetPlatform dflags) of
+   4 -> toInteger (fromInteger result :: Int32)
+   8 -> toInteger (fromInteger result :: Int64)
+   w -> panic ("intResult: Unknown platformWordSize: " ++ show w)
+
+-- | Ensure the given Integer is in the target Word range
+wordResult' :: DynFlags -> Integer -> Integer
+wordResult' dflags result = case platformWordSize (targetPlatform dflags) of
+   4 -> toInteger (fromInteger result :: Word32)
+   8 -> toInteger (fromInteger result :: Word64)
+   w -> panic ("wordResult: Unknown platformWordSize: " ++ show w)
+
+-- | Create an Int literal expression while ensuring the given Integer is in the
+-- target Int range
+intResult :: DynFlags -> Integer -> Maybe CoreExpr
+intResult dflags result = Just (mkIntVal dflags (intResult' dflags result))
+
+-- | Create a Word literal expression while ensuring the given Integer is in the
+-- target Word range
 wordResult :: DynFlags -> Integer -> Maybe CoreExpr
-wordResult dflags result = Just (mkWordVal dflags result')
-    where result' = case platformWordSize (targetPlatform dflags) of
-                    4 -> toInteger (fromInteger result :: Word32)
-                    8 -> toInteger (fromInteger result :: Word64)
-                    w -> panic ("wordResult: Unknown platformWordSize: " ++ show w)
+wordResult dflags result = Just (mkWordVal dflags (wordResult' dflags result))
+
+
+
 
 inversePrimOp :: PrimOp -> RuleM CoreExpr
 inversePrimOp primop = do
@@ -987,9 +1013,9 @@ builtinRules :: [CoreRule]
 builtinRules
   = [BuiltinRule { ru_name = fsLit "AppendLitString",
                    ru_fn = unpackCStringFoldrName,
-                   ru_nargs = 4, ru_try = \_ _ _ -> match_append_lit },
+                   ru_nargs = 4, ru_try = match_append_lit },
      BuiltinRule { ru_name = fsLit "EqString", ru_fn = eqStringName,
-                   ru_nargs = 2, ru_try = \dflags _ _ -> match_eq_string dflags },
+                   ru_nargs = 2, ru_try = match_eq_string },
      BuiltinRule { ru_name = fsLit "Inline", ru_fn = inlineIdName,
                    ru_nargs = 2, ru_try = \_ _ _ -> match_inline },
      BuiltinRule { ru_name = fsLit "MagicDict", ru_fn = idName magicDictId,
@@ -1133,37 +1159,42 @@ builtinIntegerRules =
 --      unpackFoldrCString# "foo" c (unpackFoldrCString# "baz" c n)
 --      =  unpackFoldrCString# "foobaz" c n
 
-match_append_lit :: [Expr CoreBndr] -> Maybe (Expr CoreBndr)
-match_append_lit [Type ty1,
-                    Lit (MachStr s1),
-                    c1,
-                    Var unpk `App` Type ty2
-                             `App` Lit (MachStr s2)
-                             `App` c2
-                             `App` n
-                   ]
+match_append_lit :: RuleFun
+match_append_lit _ id_unf _
+        [ Type ty1
+        , lit1
+        , c1
+        , Var unpk `App` Type ty2
+                   `App` lit2
+                   `App` c2
+                   `App` n
+        ]
   | unpk `hasKey` unpackCStringFoldrIdKey &&
     c1 `cheapEqExpr` c2
+  , Just (MachStr s1) <- exprIsLiteral_maybe id_unf lit1
+  , Just (MachStr s2) <- exprIsLiteral_maybe id_unf lit2
   = ASSERT( ty1 `eqType` ty2 )
     Just (Var unpk `App` Type ty1
                    `App` Lit (MachStr (s1 `BS.append` s2))
                    `App` c1
                    `App` n)
 
-match_append_lit _ = Nothing
+match_append_lit _ _ _ _ = Nothing
 
 ---------------------------------------------------
 -- The rule is this:
 --      eqString (unpackCString# (Lit s1)) (unpackCString# (Lit s2) = s1==s2
 
-match_eq_string :: DynFlags -> [Expr CoreBndr] -> Maybe (Expr CoreBndr)
-match_eq_string _ [Var unpk1 `App` Lit (MachStr s1),
-                        Var unpk2 `App` Lit (MachStr s2)]
-  | unpk1 `hasKey` unpackCStringIdKey,
-    unpk2 `hasKey` unpackCStringIdKey
+match_eq_string :: RuleFun
+match_eq_string _ id_unf _
+        [Var unpk1 `App` lit1, Var unpk2 `App` lit2]
+  | unpk1 `hasKey` unpackCStringIdKey
+  , unpk2 `hasKey` unpackCStringIdKey
+  , Just (MachStr s1) <- exprIsLiteral_maybe id_unf lit1
+  , Just (MachStr s2) <- exprIsLiteral_maybe id_unf lit2
   = Just (if s1 == s2 then trueValBool else falseValBool)
 
-match_eq_string _ _ = Nothing
+match_eq_string _ _ _ _ = Nothing
 
 
 ---------------------------------------------------
@@ -1401,20 +1432,24 @@ match_smallIntegerTo _ _ _ _ _ = Nothing
 
 -- | Match the scrutinee of a case and potentially return a new scrutinee and a
 -- function to apply to each literal alternative.
-caseRules :: CoreExpr -> Maybe (CoreExpr, Integer -> Integer)
-caseRules scrut = case scrut of
+caseRules :: DynFlags -> CoreExpr -> Maybe (CoreExpr, Integer -> Integer)
+caseRules dflags scrut = case scrut of
+
+   -- We need to call wordResult' and intResult' to ensure that the literal
+   -- alternatives remain in Word/Int target ranges (cf Note [Word/Int
+   -- underflow/overflow] and #13172).
 
    -- v `op` x#
    App (App (Var f) v) (Lit l)
       | Just op <- isPrimOpId_maybe f
       , Just x  <- isLitValue_maybe l ->
       case op of
-         WordAddOp -> Just (v, \y -> y-x      )
-         IntAddOp  -> Just (v, \y -> y-x      )
-         WordSubOp -> Just (v, \y -> y+x      )
-         IntSubOp  -> Just (v, \y -> y+x      )
-         XorOp     -> Just (v, \y -> y `xor` x)
-         XorIOp    -> Just (v, \y -> y `xor` x)
+         WordAddOp -> Just (v, \y -> wordResult' dflags $ y-x      )
+         IntAddOp  -> Just (v, \y -> intResult'  dflags $ y-x      )
+         WordSubOp -> Just (v, \y -> wordResult' dflags $ y+x      )
+         IntSubOp  -> Just (v, \y -> intResult'  dflags $ y+x      )
+         XorOp     -> Just (v, \y -> wordResult' dflags $ y `xor` x)
+         XorIOp    -> Just (v, \y -> intResult'  dflags $ y `xor` x)
          _         -> Nothing
 
    -- x# `op` v
@@ -1422,21 +1457,21 @@ caseRules scrut = case scrut of
       | Just op <- isPrimOpId_maybe f
       , Just x  <- isLitValue_maybe l ->
       case op of
-         WordAddOp -> Just (v, \y -> y-x      )
-         IntAddOp  -> Just (v, \y -> y-x      )
-         WordSubOp -> Just (v, \y -> x-y      )
-         IntSubOp  -> Just (v, \y -> x-y      )
-         XorOp     -> Just (v, \y -> y `xor` x)
-         XorIOp    -> Just (v, \y -> y `xor` x)
+         WordAddOp -> Just (v, \y -> wordResult' dflags $ y-x      )
+         IntAddOp  -> Just (v, \y -> intResult'  dflags $ y-x      )
+         WordSubOp -> Just (v, \y -> wordResult' dflags $ x-y      )
+         IntSubOp  -> Just (v, \y -> intResult'  dflags $ x-y      )
+         XorOp     -> Just (v, \y -> wordResult' dflags $ y `xor` x)
+         XorIOp    -> Just (v, \y -> intResult'  dflags $ y `xor` x)
          _         -> Nothing
 
    -- op v
    App (Var f) v
       | Just op <- isPrimOpId_maybe f ->
       case op of
-         NotOp     -> Just (v, \y -> complement y)
-         NotIOp    -> Just (v, \y -> complement y)
-         IntNegOp  -> Just (v, \y -> negate y    )
+         NotOp     -> Just (v, \y -> wordResult' dflags $ complement y)
+         NotIOp    -> Just (v, \y -> intResult'  dflags $ complement y)
+         IntNegOp  -> Just (v, \y -> intResult'  dflags $ negate y    )
          _         -> Nothing
 
    _ -> Nothing

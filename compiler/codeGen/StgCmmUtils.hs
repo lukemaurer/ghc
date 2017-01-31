@@ -322,7 +322,7 @@ newStringCLit str = newByteStringCLit (map (fromIntegral . ord) str)
 newByteStringCLit :: [Word8] -> FCode CmmLit
 newByteStringCLit bytes
   = do  { uniq <- newUnique
-        ; let (lit, decl) = mkByteStringCLit uniq bytes
+        ; let (lit, decl) = mkByteStringCLit (mkStringLitLabel uniq) bytes
         ; emitDecl decl
         ; return lit }
 
@@ -362,11 +362,11 @@ newUnboxedTupleRegs res_ty
         ; sequel <- getSequel
         ; regs <- choose_regs dflags sequel
         ; ASSERT( regs `equalLength` reps )
-          return (regs, map slotForeignHint reps) }
+          return (regs, map primRepForeignHint reps) }
   where
-    MultiRep reps = repType res_ty
+    reps = typePrimRep res_ty
     choose_regs _ (AssignTo regs _) = return regs
-    choose_regs dflags _            = mapM (newTemp . slotCmmType dflags) reps
+    choose_regs dflags _            = mapM (newTemp . primRepCmmType dflags) reps
 
 
 

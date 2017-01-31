@@ -25,8 +25,7 @@ import Name             ( Name, mkSystemVarName, isExternalName, getOccFS )
 import Coercion hiding  ( substCo, substCoVar )
 import OptCoercion      ( optCoercion )
 import FamInstEnv       ( topNormaliseType_maybe )
-import DataCon          ( DataCon, dataConWorkId, dataConRepStrictness
-                        , isMarkedStrict, dataConRepArgTys ) --, dataConTyCon, dataConTag, fIRST_TAG )
+import DataCon          ( DataCon, dataConWorkId, dataConRepStrictness, dataConRepArgTys )
 --import TyCon            ( isEnumerationTyCon ) -- temporalily commented out. See #8326
 import CoreMonad        ( Tick(..), SimplifierMode(..) )
 import CoreSyn
@@ -649,7 +648,7 @@ makeTrivialWithInfo :: TopLevelFlag -> SimplEnv
 -- Returned SimplEnv has same substitution as incoming one
 makeTrivialWithInfo top_lvl env context info expr
   | exprIsTrivial expr                          -- Already trivial
-  || not (bindingOk top_lvl expr expr_ty)       -- Cannot trivialise
+  || not (bindingOk top_lvl expr)               -- Cannot trivialise
                                                 --   See Note [Cannot trivialise]
   = return (env, expr)
   | otherwise           -- See Note [Take care] below
@@ -671,11 +670,11 @@ makeTrivialWithInfo top_lvl env context info expr
   where
     expr_ty = exprType expr
 
-bindingOk :: TopLevelFlag -> CoreExpr -> Type -> Bool
+bindingOk :: TopLevelFlag -> CoreExpr -> Bool
 -- True iff we can have a binding of this expression at this level
 -- Precondition: the type is the type of the expression
-bindingOk top_lvl _ expr_ty
-  | isTopLevel top_lvl = not (isUnliftedType expr_ty)
+bindingOk top_lvl expr
+  | isTopLevel top_lvl = exprIsTopLevelBindable expr
   | otherwise          = True
 
 {-
@@ -694,12 +693,16 @@ so we don't want to turn it into
 because we'll just end up inlining x back, and that makes the
 simplifier loop.  Better not to ANF-ise it at all.
 
-A case in point is literal strings (a MachStr is not regarded as
-trivial):
+Literal strings are an exception.
 
    foo = Ptr "blob"#
 
-We don't want to ANF-ise this.
+We want to turn this into:
+
+   foo1 = "blob"#
+   foo = Ptr foo1
+
+See Note [CoreSyn top-level string literals] in CoreSyn.
 
 ************************************************************************
 *                                                                      *
@@ -1287,6 +1290,10 @@ simplCast env body co0 cont0
        addCoerce co (ApplyToVal { sc_arg = arg, sc_env = arg_se
                                 , sc_dup = dup, sc_cont = tail })
          | Just (co1, co2) <- pushCoValArg co
+         , Pair _ new_ty <- coercionKind co1
+         , not (isTypeLevPoly new_ty)  -- without this check, we get a lev-poly arg
+                                       -- See Note [Levity polymorphism invariants] in CoreSyn
+                                       -- test: typecheck/should_run/EtaExpandLevPoly
          = do { (dup', arg_se', arg') <- simplArg env dup arg_se arg
                    -- When we build the ApplyTo we can't mix the OutCoercion
                    -- 'co' with the InExpr 'arg', so we simplify
@@ -1383,7 +1390,7 @@ simplLamBndrs :: SimplEnv -> [InBndr] -> SimplM (SimplEnv, [OutBndr])
 simplLamBndrs env bndrs = mapAccumLM simplLamBndr env bndrs
 
 -------------
-simplLamBndr :: SimplEnv -> Var -> SimplM (SimplEnv, Var)
+simplLamBndr :: SimplEnv -> InBndr -> SimplM (SimplEnv, OutBndr)
 -- Used for lambda binders.  These sometimes have unfoldings added by
 -- the worker/wrapper pass that must be preserved, because they can't
 -- be reconstructed from context.  For example:
@@ -1391,7 +1398,7 @@ simplLamBndr :: SimplEnv -> Var -> SimplM (SimplEnv, Var)
 --      fw a b x{=(a,b)} = ...
 -- The "{=(a,b)}" is an unfolding we can't reconstruct otherwise.
 simplLamBndr env bndr
-  | isId bndr && hasSomeUnfolding old_unf   -- Special case
+  | isId bndr && isFragileUnfolding old_unf   -- Special case
   = do { (env1, bndr1) <- simplBinder env bndr
        ; unf'          <- simplUnfolding env1 NotTopLevel Nothing bndr old_unf
        ; let bndr2 = bndr1 `setIdUnfolding` unf'
@@ -2354,9 +2361,7 @@ simplAlt env scrut' _ case_bndr' cont' (DataAlt con, vs, rhs)
         where
           go [] [] = []
           go (v:vs') strs | isTyVar v = v : go vs' strs
-          go (v:vs') (str:strs)
-            | isMarkedStrict str = eval v : go vs' strs
-            | otherwise          = zap v  : go vs' strs
+          go (v:vs') (str:strs) = zap str v : go vs' strs
           go _ _ = pprPanic "cat_evals"
                     (ppr con $$
                      ppr vs  $$
@@ -2369,8 +2374,9 @@ simplAlt env scrut' _ case_bndr' cont' (DataAlt con, vs, rhs)
                                     -- NB: If this panic triggers, note that
                                     -- NoStrictnessMark doesn't print!
 
-          zap v  = zapIdOccInfo v   -- See Note [Case alternative occ info]
-          eval v = zap v `setIdUnfolding` evaldUnfolding
+          zap str v = setCaseBndrEvald str $ -- Add eval'dness info
+                      zapIdOccInfo v         -- And kill occ info;
+                                             -- see Note [Case alternative occ info]
 
 addAltUnfoldings :: SimplEnv -> Maybe OutExpr -> OutId -> OutExpr -> SimplM SimplEnv
 addAltUnfoldings env scrut case_bndr con_app
@@ -2773,7 +2779,7 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
                       DataAlt dc -> setIdUnfolding case_bndr unf
                           where
                                  -- See Note [Case binders and join points]
-                             unf = mkInlineUnfolding Nothing rhs
+                             unf = mkInlineUnfolding rhs
                              rhs = mkConApp2 dc (tyConAppArgs scrut_ty) bndrs'
 
                       LitAlt {} -> WARN( True, text "mkDupableAlt"
@@ -2856,7 +2862,7 @@ Consider this
 If we make a join point with c but not c# we get
   $j = \c -> ....c....
 
-But if later inlining scrutines the c, thus
+But if later inlining scrutinises the c, thus
 
   $j = \c -> ... case c of { I# y -> ... } ...
 

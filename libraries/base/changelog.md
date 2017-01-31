@@ -31,11 +31,19 @@
   * Added `Eq1`, `Ord1`, `Read1` and `Show1` instances for `NonEmpty`.
 
   * Add wrappers for `blksize_t`, `blkcnt_t`, `clockid_t`, `fsblkcnt_t`,
-    `fsfilcnt_t`, `id_t`, and `key_t` to System.Posix.Types (#12795)
+    `fsfilcnt_t`, `id_t`, `key_t`, and `timer_t` to System.Posix.Types (#12795)
+
+  * Add `CBool`, a wrapper around C's `bool` type, to `Foreign.C.Types`
+    (#13136)
 
   * Raw buffer operations in `GHC.IO.FD` are now strict in the buffer, offset, and length operations (#9696)
 
   * Add `plusForeignPtr` to `Foreign.ForeignPtr`.
+
+  * Add `type family AppendSymbol (m :: Symbol) (n :: Symbol) :: Symbol` to `GHC.TypeLits`
+    (#12162)
+
+  * The type of `asProxyTypeOf` in `Data.Proxy` has been generalized (#12805)
 
 ## 4.9.0.0  *May 2016*
 

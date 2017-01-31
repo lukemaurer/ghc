@@ -62,11 +62,7 @@ import System.Directory
 
 import Exception
 
-#if __GLASGOW_HASKELL__ >= 709
-import Foreign
-#else
-import Foreign.Safe
-#endif
+import Foreign (Ptr) -- needed for 2nd stage
 
 {- **********************************************************************
 
@@ -884,18 +880,23 @@ dynLoadObjs hsc_env pls objs = do
                         concatMap
                             (\(lp, l) ->
                                  [ Option ("-L" ++ lp)
-                                 , Option ("-Wl,-rpath")
-                                 , Option ("-Wl," ++ lp)
+                                 , Option "-Xlinker"
+                                 , Option "-rpath"
+                                 , Option "-Xlinker"
+                                 , Option lp
                                  , Option ("-l" ++  l)
                                  ])
                             (temp_sos pls)
                         ++ concatMap
                              (\lp ->
                                  [ Option ("-L" ++ lp)
-                                 , Option ("-Wl,-rpath")
-                                 , Option ("-Wl," ++ lp)
+                                 , Option "-Xlinker"
+                                 , Option "-rpath"
+                                 , Option "-Xlinker"
+                                 , Option lp
                                  ])
                              minus_big_ls
+                        -- See Note [-Xlinker -rpath vs -Wl,-rpath]
                         ++ map (\l -> Option ("-l" ++ l)) minus_ls,
                       -- Add -l options and -L options from dflags.
                       --
@@ -1355,7 +1356,9 @@ locateLib hsc_env is_hs dirs lib
      loading_profiled_hs_libs = interpreterProfiled dflags
      loading_dynamic_hs_libs  = interpreterDynamic dflags
 
-     import_libs  = [lib <.> "lib", "lib" ++ lib <.> "lib", "lib" ++ lib <.> "dll.a"]
+     import_libs  = [ lib <.> "lib"           , "lib" ++ lib <.> "lib"
+                    , "lib" ++ lib <.> "dll.a", lib <.> "dll.a"
+                    ]
 
      hs_dyn_lib_name = lib ++ '-':programName dflags ++ projectVersion dflags
      hs_dyn_lib_file = mkHsSOName platform hs_dyn_lib_name

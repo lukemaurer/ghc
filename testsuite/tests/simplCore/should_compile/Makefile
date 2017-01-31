@@ -114,6 +114,15 @@ T5327:
 T5623:
 	$(RM) -f T5623.hi T5623.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T5623.hs -O -ddump-prep | grep -c "plusAddr#"
+T13155:
+	$(RM) -f T13155.hi T13155.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T13155.hs -O -ddump-prep | grep -c "plusAddr#"
+        # There should be only one plusAddr#!
+
+T13156:
+	$(RM) -f T13156.hi T13156.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c T13156.hs -O -ddump-prep -dsuppress-uniques | grep "case"
+        # There should be a single 'case case'
 
 .PHONY: T4138
 T4138:
@@ -177,3 +186,8 @@ T13025:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025a.hs
 	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c HEq_sc
 	# No lines should match 'HEq_sc' so wc should output zeros
+
+.PHONY: str-rules
+str-rules:
+	$(RM) -f str-rules.hi str-rules.o
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O str-rules.hs -ddump-simpl | grep -o '"@@@[^"].*"#' | sort

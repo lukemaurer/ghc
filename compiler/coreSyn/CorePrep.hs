@@ -1155,7 +1155,7 @@ tryEtaReducePrep _ _ = Nothing
 
 Note [Pin demand info on floats]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We pin demand info on floated lets so that we can see the one-shot thunks.
+We pin demand info on floated lets, so that we can see the one-shot thunks.
 -}
 
 data FloatingBind
@@ -1260,7 +1260,9 @@ deFloatTop (Floats _ floats)
   = foldrOL get [] floats
   where
     get (FloatLet b) bs = occurAnalyseRHSs b : bs
-    get b            _  = pprPanic "corePrepPgm" (ppr b)
+    get (FloatCase var body _) bs  =
+      occurAnalyseRHSs (NonRec var body) : bs
+    get b _ = pprPanic "corePrepPgm" (ppr b)
 
     -- See Note [Dead code in CorePrep]
     occurAnalyseRHSs (NonRec x e) = NonRec x (occurAnalyseExpr_NoBinderSwap e)
@@ -1408,7 +1410,7 @@ allLazyNested is_rec (Floats IfUnboxedOk _) = isNonRec is_rec
 --          x = lazy @ (forall a. a) y @ Bool
 --
 -- When we inline 'x' after eliminating 'lazy', we need to replace
--- occurences of 'x' with 'y @ bool', not just 'y'.  Situations like
+-- occurrences of 'x' with 'y @ bool', not just 'y'.  Situations like
 -- this can easily arise with higher-rank types; thus, cpe_env must
 -- map to CoreExprs, not Ids.
 

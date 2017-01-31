@@ -45,6 +45,12 @@ Compiler
   syntax can be used, in addition to a new form for specifying the cost centre
   name. See :ref:`scc-pragma` for examples.
 
+- GHC is now much more particular about :ghc-flag:`-XDefaultSignatures`. The
+  type signature for a default method of a type class must now be the same as
+  the corresponding main method's type signature modulo differences in the
+  signatures' contexts. Otherwise, the typechecker will reject that class's
+  definition. See :ref:`class-default-signatures` for further details.
+
 - It is now possible to explicitly pick a strategy to use when deriving a
   class instance using the :ghc-flag:`-XDerivingStrategies` language extension
   (see :ref:`deriving-strategies`).
@@ -119,6 +125,10 @@ Compiler
   :ghc-flag:`-Wmissing-methods` will now warn that ``_Bar`` is not implemented
   in the ``Foo Int`` instance.
 
+- A new flag :ghc-flag:`-ddump-json` has been added. This flag dumps compiler
+  output as JSON documents. It is experimental and will be refined depending
+  on feedback from tooling authors for the next release.
+
 GHCi
 ~~~~
 
@@ -148,16 +158,74 @@ Template Haskell
    be ambiguous in the presence of :ghc-flag:`-XPolyKinds`.
    (:ghc-ticket:`12646`)
 
+-  Quoted type signatures are more accurate with respect to implicitly
+   quantified type variables. Before, if you quoted this: ::
+
+     [d| id :: a -> a
+         id x = x
+       |]
+
+   then the code that Template Haskell would give back to you would actually be
+   this instead: ::
+
+     id :: forall a. a -> a
+     id x = x
+
+   That is, quoting would explicitly quantify all type variables, even ones
+   that were implicitly quantified in the source. This could be especially
+   harmful if a kind variable was implicitly quantified. For example, if
+   you took this quoted declaration: ::
+
+     [d| idProxy :: forall proxy (b :: k). proxy b -> proxy b
+         idProxy x = x
+       |]
+
+   and tried to splice it back in, you'd get this instead: ::
+
+     idProxy :: forall k proxy (b :: k). proxy b -> proxy b
+     idProxy x = x
+
+   Now ``k`` is explicitly quantified, and that requires turning on
+   :ghc-flag:`-XTypeInType`, whereas the original declaration did not!
+
+   Template Haskell quoting now respects implicit quantification in type
+   signatures, so the quoted declarations above now correctly leave the
+   type variables ``a`` and ``k`` as implicitly quantified.
+   (:ghc-ticket:`13018` and :ghc-ticket:`13123`)
+
+- Looking up type constructors with symbol names (e.g., ``+``) now works
+  as expected (:ghc-ticket:`11046`)
+
+
 Runtime system
 ~~~~~~~~~~~~~~
 
--  TODO FIXME.
+- TODO FIXME.
+
+- Added support for *Compact Regions*, which offer a way to manually
+  move long-lived data outside of the heap so that the garbage
+  collector does not have to trace it repeatedly.  Compacted data can
+  also be serialized, stored, and deserialized again later by the same
+  program.  For more details see the :compact-ref:`Data.Compact
+  <Data-Compact.html>` module.
+
+- There is new support for improving performance on machines with a
+  Non-Uniform Memory Architecture (NUMA).  See :rts-flag:`--numa`.
+  This is supported on Linux and Windows systems.
+
+- The garbage collector can be told to use fewer threads than the
+  global number of capabilities set by :rts-flag:`-N`.  See
+  :rts-flag:`-qn`, and a `blog post
+  <http://simonmar.github.io/posts/2016-12-08-Haskell-in-the-datacentre.html>`_
+  that describes this.
 
 - The :ref:`heap profiler <prof-heap>` can now emit heap census data to the GHC
   event log, allowing heap profiles to be correlated with other tracing events
   (see :ghc-ticket:`11094`).
 
-- Added NUMA support to Windows.
+- Some bugs have been fixed in the stack-trace implementation in the
+  profiler that sometimes resulted in incorrect stack traces and
+  costs attributed to the wrong cost centre stack (see :ghc-ticket:`5654`).
 
 - Added processor group support for Windows. This allows the runtime to allocate
   threads to all cores in systems which have multiple processor groups.
@@ -206,6 +274,9 @@ See ``changelog.md`` in the ``base`` package for full release notes.
   terms of ``ReadPrec`` instead of ``ReadS``. This matches the interface
   provided in GHC's version of the ``Read`` class, and allows users to write
   more efficient ``Read1`` and ``Read2`` instances.
+
+- Add ``type family AppendSymbol (m :: Symbol) (n :: Symbol) :: Symbol`` to
+  ``GHC.TypeLits``
 
 binary
 ~~~~~~

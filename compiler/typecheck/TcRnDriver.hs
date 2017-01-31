@@ -59,6 +59,8 @@ import Plugins ( tcPlugin )
 import DynFlags
 import StaticFlags
 import HsSyn
+import IfaceSyn ( ShowSub(..), showToHeader )
+import IfaceType( ShowForAllFlag(..) )
 import PrelNames
 import RdrName
 import TcHsSyn
@@ -67,7 +69,7 @@ import TcRnMonad
 import TcRnExports
 import TcEvidence
 import qualified BooleanFormula as BF
-import PprTyThing( pprTyThing )
+import PprTyThing( pprTyThingInContext )
 import MkIface( tyThingToIfaceDecl )
 import Coercion( pprCoAxiom )
 import CoreFVs( orphNamesOfFamInst )
@@ -150,6 +152,7 @@ tcRnModule hsc_env hsc_src save_rn_syntax
               (const ()) $
    initTc hsc_env hsc_src save_rn_syntax this_mod real_loc $
           withTcPlugins hsc_env $
+
           tcRnModuleTcRnM hsc_env hsc_src parsedModule pair
 
   | otherwise
@@ -250,7 +253,7 @@ tcRnModuleTcRnM hsc_env hsc_src
         tcg_env <- tcRnExports explicit_mod_hdr export_ies tcg_env ;
         traceRn "rn4b: after exports" empty ;
 
-                -- Check that main is exported (must be after rnExports)
+                -- Check that main is exported (must be after tcRnExports)
         checkMainExported tcg_env ;
 
         -- Compare the hi-boot iface (if any) with the real thing
@@ -372,13 +375,10 @@ tcRnSrcDecls explicit_mod_hdr decls
               do { (tcg_env, tcl_env) <- tc_rn_src_decls decls
 
                    -- Check for the 'main' declaration
-                   -- Must do this inside the captureConstraints
+                   -- Must do this inside the captureTopConstraints
                  ; tcg_env <- setEnvs (tcg_env, tcl_env) $
                               checkMain explicit_mod_hdr
                  ; return (tcg_env, tcl_env) }
-
-        -- Emit Typeable bindings
-      ; tcg_env <- setGblEnv tcg_env mkTypeableBinds
 
       ; setEnvs (tcg_env, tcl_env) $ do {
 
@@ -394,9 +394,12 @@ tcRnSrcDecls explicit_mod_hdr decls
       ; new_ev_binds <- {-# SCC "simplifyTop" #-}
                         simplifyTop lie
 
+        -- Emit Typeable bindings
+      ; tcg_env <- mkTypeableBinds
+
         -- Finalizers must run after constraints are simplified, or some types
         -- might not be complete when using reify (see #12777).
-      ; (tcg_env, tcl_env) <- run_th_modfinalizers
+      ; (tcg_env, tcl_env) <- setGblEnv tcg_env run_th_modfinalizers
       ; setEnvs (tcg_env, tcl_env) $ do {
 
       ; finishTH
@@ -560,7 +563,7 @@ tcRnHsBootDecls hsc_src decls
               <- rnTopSrcDecls first_group
         -- The empty list is for extra dependencies coming from .hs-boot files
         -- See Note [Extra dependencies from .hs-boot files] in RnSource
-        ; (gbl_env, lie) <- captureConstraints $ setGblEnv tcg_env $ do {
+        ; (gbl_env, lie) <- captureTopConstraints $ setGblEnv tcg_env $ do {
 
 
                 -- Check for illegal declarations
@@ -1176,17 +1179,33 @@ badReexportedBootThing is_boot name name'
 
 bootMisMatch :: Bool -> SDoc -> TyThing -> TyThing -> SDoc
 bootMisMatch is_boot extra_info real_thing boot_thing
-  = vcat [ppr real_thing <+>
-          text "has conflicting definitions in the module",
-          text "and its" <+>
-            (if is_boot then text "hs-boot file"
-                       else text "hsig file"),
-          text "Main module:" <+> PprTyThing.pprTyThing real_thing,
-          (if is_boot
-            then text "Boot file:  "
-            else text "Hsig file: ")
-            <+> PprTyThing.pprTyThing boot_thing,
-          extra_info]
+  = pprBootMisMatch is_boot extra_info real_thing real_doc boot_doc
+  where
+    to_doc
+      = pprTyThingInContext $ showToHeader { ss_forall =
+                                              if is_boot
+                                                then ShowForAllMust
+                                                else ShowForAllWhen }
+
+    real_doc = to_doc real_thing
+    boot_doc = to_doc boot_thing
+
+    pprBootMisMatch :: Bool -> SDoc -> TyThing -> SDoc -> SDoc -> SDoc
+    pprBootMisMatch is_boot extra_info real_thing real_doc boot_doc
+      = vcat
+          [ ppr real_thing <+>
+            text "has conflicting definitions in the module",
+            text "and its" <+>
+              (if is_boot
+                then text "hs-boot file"
+                else text "hsig file"),
+            text "Main module:" <+> real_doc,
+              (if is_boot
+                then text "Boot file:  "
+                else text "Hsig file: ")
+                <+> boot_doc,
+            extra_info
+          ]
 
 instMisMatch :: Bool -> ClsInst -> SDoc
 instMisMatch is_boot inst
@@ -1992,18 +2011,15 @@ tcGhciStmts stmts
 
         -- OK, we're ready to typecheck the stmts
         traceTc "TcRnDriver.tcGhciStmts: tc stmts" empty ;
-        ((tc_stmts, ids), lie) <- captureConstraints $
+        ((tc_stmts, ids), lie) <- captureTopConstraints $
                                   tc_io_stmts $ \ _ ->
                                   mapM tcLookupId names  ;
                         -- Look up the names right in the middle,
                         -- where they will all be in scope
 
-        -- wanted constraints from static forms
-        stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
-
         -- Simplify the context
         traceTc "TcRnDriver.tcGhciStmts: simplify ctxt" empty ;
-        const_binds <- checkNoErrs (simplifyInteractive (andWC stWC lie)) ;
+        const_binds <- checkNoErrs (simplifyInteractive lie) ;
                 -- checkNoErrs ensures that the plan fails if context redn fails
 
         traceTc "TcRnDriver.tcGhciStmts: done" empty ;
@@ -2093,19 +2109,17 @@ tcRnExpr hsc_env mode rdr_expr
                   else return expr_ty } ;
 
     -- Generalise
-    ((qtvs, dicts, _), lie_top) <- captureConstraints $
+    ((qtvs, dicts, _), lie_top) <- captureTopConstraints $
                                    {-# SCC "simplifyInfer" #-}
                                    simplifyInfer tclvl
                                                  infer_mode
                                                  []    {- No sig vars -}
                                                  [(fresh_it, res_ty)]
                                                  lie ;
-    -- Wanted constraints from static forms
-    stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
 
     -- Ignore the dictionary bindings
     _ <- perhaps_disable_default_warnings $
-         simplifyInteractive (andWC stWC lie_top) ;
+         simplifyInteractive lie_top ;
 
     let { all_expr_ty = mkInvForAllTys qtvs (mkLamTypes dicts res_ty) } ;
     ty <- zonkTcType all_expr_ty ;
@@ -2496,7 +2510,7 @@ ppr_tydecls tycons
   = vcat [ ppr (tyThingToIfaceDecl (ATyCon tc))
          | tc <- sortBy (comparing getOccName) tycons ]
     -- The Outputable instance for IfaceDecl uses
-    -- showAll, which is what we want here, whereas
+    -- showToIface, which is what we want here, whereas
     -- pprTyThing uses ShowSome.
 
 {-

@@ -5,7 +5,8 @@ module TcSimplify(
        growThetaTyVars,
        simplifyAmbiguityCheck,
        simplifyDefault,
-       simplifyTop, simplifyInteractive, solveEqualities,
+       simplifyTop, captureTopConstraints,
+       simplifyInteractive, solveEqualities,
        simplifyWantedsTcM,
        tcCheckSatisfiability,
 
@@ -37,7 +38,7 @@ import TcSMonad  as TcS
 import TcType
 import TrieMap       () -- DV: for now
 import Type
-import TysWiredIn    ( ptrRepLiftedTy )
+import TysWiredIn    ( liftedRepTy )
 import Unify         ( tcMatchTyKi )
 import Util
 import Var
@@ -57,6 +58,27 @@ import Data.List     ( partition )
 *                                                                               *
 *********************************************************************************
 -}
+
+captureTopConstraints :: TcM a -> TcM (a, WantedConstraints)
+-- (captureTopConstraints m) runs m, and returns the type constraints it
+-- generates plus the constraints produced by static forms inside.
+-- If it fails with an exception, it reports any insolubles
+-- (out of scope variables) before doing so
+captureTopConstraints thing_inside
+  = do { static_wc_var <- TcM.newTcRef emptyWC ;
+       ; (mb_res, lie) <- TcM.updGblEnv (\env -> env { tcg_static_wc = static_wc_var } ) $
+                          TcM.tryCaptureConstraints thing_inside
+       ; stWC <- TcM.readTcRef static_wc_var
+
+       -- See TcRnMonad Note [Constraints and errors]
+       -- If the thing_inside threw an exception, but generated some insoluble
+       -- constraints, report the latter before propagating the exception
+       -- Otherwise they will be lost altogether
+       ; case mb_res of
+           Right res -> return (res, lie `andWC` stWC)
+           Left {}   -> do { _ <- reportUnsolved lie; failM } }
+                -- This call to reportUnsolved is the reason
+                -- this function is here instead of TcRnMonad
 
 simplifyTop :: WantedConstraints -> TcM (Bag EvBind)
 -- Simplify top-level constraints
@@ -128,7 +150,7 @@ simpl_top wanteds
                    -- zonkTyCoVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi,
                    -- and we definitely don't want to try to assign to those!
-                   -- the isTyVar needs to weed out coercion variables
+                   -- The isTyVar is needed to weed out coercion variables
 
            ; defaulted <- mapM defaultTyVarTcS meta_tvs   -- Has unification side effects
            ; if or defaulted
@@ -645,7 +667,7 @@ simplifyInfer rhs_tclvl infer_mode sigs name_taus wanteds
          -- they had better be unifiable at the outer_tclvl!
          -- Example:   envt mentions alpha[1]
          --            tau_ty = beta[2] -> beta[2]
-         --            consraints = alpha ~ [beta]
+         --            constraints = alpha ~ [beta]
          -- we don't quantify over beta (since it is fixed by envt)
          -- so we must promote it!  The inferred type is just
          --   f :: beta -> beta
@@ -931,7 +953,7 @@ over them, for two reasons
   add it to the ic_skols of the residual implication.
 
   Note that we /only/ do this to the residual implication. We don't
-  complicate the quantified type varialbes of 'f' for downstream code;
+  complicate the quantified type variables of 'f' for downstream code;
   it's just a device to make the error message generator know what to
   report.
 
@@ -1586,15 +1608,14 @@ promoteTyVarTcS tclvl tv
   | otherwise
   = return ()
 
--- | If the tyvar is a RuntimeRep var, set it to PtrRepLifted. Returns whether or
--- not this happened.
+-- | If the tyvar is a RuntimeRep var, set it to LiftedRep.
 defaultTyVar :: TcTyVar -> TcM ()
 -- Precondition: MetaTyVars only
 -- See Note [DefaultTyVar]
 defaultTyVar the_tv
   | isRuntimeRepVar the_tv
   = do { traceTc "defaultTyVar RuntimeRep" (ppr the_tv)
-       ; writeMetaTyVar the_tv ptrRepLiftedTy }
+       ; writeMetaTyVar the_tv liftedRepTy }
 
   | otherwise = return ()    -- The common case
 
@@ -1603,7 +1624,7 @@ defaultTyVarTcS :: TcTyVar -> TcS Bool
 defaultTyVarTcS the_tv
   | isRuntimeRepVar the_tv
   = do { traceTcS "defaultTyVarTcS RuntimeRep" (ppr the_tv)
-       ; unifyTyVar the_tv ptrRepLiftedTy
+       ; unifyTyVar the_tv liftedRepTy
        ; return True }
   | otherwise
   = return False  -- the common case
@@ -1693,7 +1714,7 @@ There are two caveats:
 Note [DefaultTyVar]
 ~~~~~~~~~~~~~~~~~~~
 defaultTyVar is used on any un-instantiated meta type variables to
-default any RuntimeRep variables to PtrRepLifted.  This is important
+default any RuntimeRep variables to LiftedRep.  This is important
 to ensure that instance declarations match.  For example consider
 
      instance Show (a->b)
@@ -1709,7 +1730,7 @@ hand.  However we aren't ready to default them fully to () or
 whatever, because the type-class defaulting rules have yet to run.
 
 An alternate implementation would be to emit a derived constraint setting
-the RuntimeRep variable to PtrRepLifted, but this seems unnecessarily indirect.
+the RuntimeRep variable to LiftedRep, but this seems unnecessarily indirect.
 
 Note [Promote _and_ default when inferring]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

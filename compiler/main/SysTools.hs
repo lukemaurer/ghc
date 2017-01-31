@@ -85,7 +85,11 @@ import qualified System.Posix.Internals
 #else /* Must be Win32 */
 import Foreign
 import Foreign.C.String
-import qualified System.Win32.Info as Info
+#if MIN_VERSION_Win32(2,5,0)
+import qualified System.Win32.Types as Win32
+#else
+import qualified System.Win32.Info as Win32
+#endif
 import Control.Exception (finally)
 import Foreign.Ptr (FunPtr, castPtrToFunPtr)
 import System.Win32.Types (DWORD, LPTSTR, HANDLE)
@@ -1240,7 +1244,11 @@ runSomethingResponseFile dflags filter_fn phase_name pgm args mb_env =
     getResponseFile args = do
       fp <- newTempName dflags "rsp"
       withFile fp WriteMode $ \h -> do
+#if defined(mingw32_HOST_OS)
+          hSetEncoding h latin1
+#else
           hSetEncoding h utf8
+#endif
           hPutStr h $ unlines $ map escape args
       return fp
 
@@ -1510,7 +1518,7 @@ getFinalPath name = do
                                                      (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
                                                      Nothing
                       let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
-                      path    <- Info.try "GetFinalPathName"
+                      path    <- Win32.try "GetFinalPathName"
                                     (\buf len -> fnPtr handle buf len 0) 512
                                     `finally` closeHandle handle
                       return $ Just path
@@ -1584,7 +1592,8 @@ linkDynLib dflags0 o_files dep_packages
              osMachOTarget (platformOS (targetPlatform dflags)) ) &&
            dynLibLoader dflags == SystemDependent &&
            WayDyn `elem` ways dflags
-            = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
+            = ["-L" ++ l, "-Xlinker", "-rpath", "-Xlinker", l]
+              -- See Note [-Xlinker -rpath vs -Wl,-rpath]
          | otherwise = ["-L" ++ l]
 
     let lib_paths = libraryPaths dflags

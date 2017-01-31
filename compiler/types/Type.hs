@@ -3,7 +3,7 @@
 --
 -- Type - public interface
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, FlexibleContexts #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Main functions for manipulating types and type-related things
@@ -106,7 +106,7 @@ module Type (
         isValidJoinPointType,
 
         -- (Lifting and boxity)
-        isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
+        isLiftedType_maybe, isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
         isAlgType, isClosedAlgType,
         isPrimitiveType, isStrictType,
         isRuntimeRepTy, isRuntimeRepVar, isRuntimeRepKindedTy,
@@ -117,7 +117,7 @@ module Type (
         Kind,
 
         -- ** Finding the kind of a type
-        typeKind,
+        typeKind, isTypeLevPoly, resultIsLevPoly,
 
         -- ** Common Kind
         liftedTypeKind,
@@ -128,6 +128,7 @@ module Type (
         tyCoVarsOfTypeDSet,
         coVarsOfType,
         coVarsOfTypes, closeOverKinds, closeOverKindsList,
+        noFreeVarsOfType,
         splitVisVarsOfType, splitVisVarsOfTypes,
         expandTypeSynonyms,
         typeSize,
@@ -323,7 +324,7 @@ coreView (TyConApp tc tys) | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc t
 coreView _ = Nothing
 
 -- | Like 'coreView', but it also "expands" @Constraint@ to become
--- @TYPE PtrRepLifted@.
+-- @TYPE LiftedRep@.
 {-# INLINE coreViewOneStarKind #-}
 coreViewOneStarKind :: Type -> Maybe Type
 coreViewOneStarKind ty
@@ -1521,7 +1522,7 @@ isPredTy ty = go ty []
     go_tc tc args
       | tc `hasKey` eqPrimTyConKey || tc `hasKey` eqReprPrimTyConKey
                   = length args == 4  -- ~# and ~R# sadly have result kind #
-                                      -- not Contraint; but we still want
+                                      -- not Constraint; but we still want
                                       -- isPredTy to reply True.
       | otherwise = go_k (tyConKind tc) args
 
@@ -1530,12 +1531,26 @@ isPredTy ty = go ty []
     go_k k [] = isConstraintKind k
     go_k k (arg:args) = case piResultTy_maybe k arg of
                           Just k' -> go_k k' args
-                          Nothing -> pprTrace "isPredTy" (ppr ty)
+                          Nothing -> WARN( True, text "isPredTy" <+> ppr ty )
                                      False
-       -- This last case should not happen; but it does if we
-       -- we call isPredTy during kind checking, especially if
-       -- there is actually a kind error.  Example that showed
-       -- this up: polykinds/T11399
+       -- This last case shouldn't happen under most circumstances. It can
+       -- occur if we call isPredTy during kind checking, especially if one
+       -- of the following happens:
+       --
+       -- 1. There is actually a kind error.  Example in which this showed up:
+       --    polykinds/T11399
+       -- 2. A type constructor application appears to be oversaturated. An
+       --    example of this occurred in GHC Trac #13187:
+       --
+       --      {-# LANGUAGE PolyKinds #-}
+       --      type Const a b = b
+       --      f :: Const Int (,) Bool Char -> Char
+       --
+       --    This code is actually fine, since Const is polymorphic in its
+       --    return kind. It does show that isPredTy could possibly report a
+       --    false negative if a constraint is similarly oversaturated, but
+       --    it's hard to do better than isPredTy currently does without
+       --    zonking, so we punt on such cases for now.
 
 isClassPred, isEqPred, isNomEqPred, isIPPred :: PredType -> Bool
 isClassPred ty = case tyConAppTyCon_maybe ty of
@@ -1848,49 +1863,63 @@ isFamFreeTy (CoercionTy _)    = False  -- Not sure about this
 ************************************************************************
 -}
 
--- | See "Type#type_classification" for what an unlifted type is
-isUnliftedType :: Type -> Bool
+-- | Returns Just True if this type is surely lifted, Just False
+-- if it is surely unlifted, Nothing if we can't be sure (i.e., it is
+-- levity polymorphic), and panics if the kind does not have the shape
+-- TYPE r.
+isLiftedType_maybe :: HasDebugCallStack => Type -> Maybe Bool
+isLiftedType_maybe ty = go (getRuntimeRep "isLiftedType_maybe" ty)
+  where
+    go rr | Just rr' <- coreView rr = go rr'
+    go (TyConApp lifted_rep [])
+      | lifted_rep `hasKey` liftedRepDataConKey = Just True
+    go (TyConApp {}) = Just False -- everything else is unlifted
+    go _             = Nothing    -- levity polymorphic
+
+-- | See "Type#type_classification" for what an unlifted type is.
+-- Panics on levity polymorphic types.
+isUnliftedType :: HasDebugCallStack => Type -> Bool
         -- isUnliftedType returns True for forall'd unlifted types:
         --      x :: forall a. Int#
         -- I found bindings like these were getting floated to the top level.
         -- They are pretty bogus types, mind you.  It would be better never to
         -- construct them
-
-isUnliftedType ty | Just ty' <- coreView ty = isUnliftedType ty'
-isUnliftedType (ForAllTy _ ty) = isUnliftedType ty
-isUnliftedType (TyConApp tc _) = isUnliftedTyCon tc
-isUnliftedType _               = False
+isUnliftedType ty
+  = not (isLiftedType_maybe ty `orElse`
+         pprPanic "isUnliftedType" (ppr ty <+> dcolon <+> ppr (typeKind ty)))
 
 -- | Extract the RuntimeRep classifier of a type. Panics if this is not possible.
-getRuntimeRep :: String   -- ^ Printed in case of an error
+getRuntimeRep :: HasDebugCallStack
+              => String   -- ^ Printed in case of an error
               -> Type -> Type
 getRuntimeRep err ty = getRuntimeRepFromKind err (typeKind ty)
 
 -- | Extract the RuntimeRep classifier of a type from its kind.
--- For example, getRuntimeRepFromKind * = PtrRepLifted;
---              getRuntimeRepFromKind # = PtrRepUnlifted.
+-- For example, getRuntimeRepFromKind * = LiftedRep;
 -- Panics if this is not possible.
-getRuntimeRepFromKind :: String  -- ^ Printed in case of an error
+getRuntimeRepFromKind :: HasDebugCallStack
+                      => String  -- ^ Printed in case of an error
                       -> Type -> Type
 getRuntimeRepFromKind err = go
   where
     go k | Just k' <- coreViewOneStarKind k = go k'
     go k
-      | Just (tc, [arg]) <- splitTyConApp_maybe k
-      , tc `hasKey` tYPETyConKey
-      = arg
+      | (_tc, [arg]) <- splitTyConApp k
+      = ASSERT2( _tc `hasKey` tYPETyConKey, text err $$ ppr k )
+        arg
     go k = pprPanic "getRuntimeRep" (text err $$
                                      ppr k <+> dcolon <+> ppr (typeKind k))
 
 isUnboxedTupleType :: Type -> Bool
-isUnboxedTupleType ty = case tyConAppTyCon_maybe ty of
-                           Just tc -> isUnboxedTupleTyCon tc
-                           _       -> False
+isUnboxedTupleType ty
+  = tyConAppTyCon (getRuntimeRep "isUnboxedTupleType" ty) `hasKey` tupleRepDataConKey
+  -- NB: Do not use typePrimRep, as that can't tell the difference between
+  -- unboxed tuples and unboxed sums
+
 
 isUnboxedSumType :: Type -> Bool
-isUnboxedSumType ty = case tyConAppTyCon_maybe ty of
-                        Just tc -> isUnboxedSumTyCon tc
-                        _       -> False
+isUnboxedSumType ty
+  = tyConAppTyCon (getRuntimeRep "isUnboxedSumType" ty) `hasKey` sumRepDataConKey
 
 -- | See "Type#type_classification" for what an algebraic type is.
 -- Should only be applied to /types/, as opposed to e.g. partially
@@ -1915,9 +1944,8 @@ isClosedAlgType ty
 
 -- | Computes whether an argument (or let right hand side) should
 -- be computed strictly or lazily, based only on its type.
--- Currently, it's just 'isUnliftedType'.
-
-isStrictType :: Type -> Bool
+-- Currently, it's just 'isUnliftedType'. Panics on levity-polymorphic types.
+isStrictType :: HasDebugCallStack => Type -> Bool
 isStrictType = isUnliftedType
 
 isPrimitiveType :: Type -> Bool
@@ -2202,6 +2230,30 @@ typeLiteralKind l =
   case l of
     NumTyLit _ -> typeNatKind
     StrTyLit _ -> typeSymbolKind
+
+-- | Returns True if a type is levity polymorphic. Should be the same
+-- as (isKindLevPoly . typeKind) but much faster.
+-- Precondition: The type has kind (TYPE blah)
+isTypeLevPoly :: Type -> Bool
+isTypeLevPoly = go
+  where
+    go ty@(TyVarTy {})                           = check_kind ty
+    go ty@(AppTy {})                             = check_kind ty
+    go ty@(TyConApp tc _) | not (isTcLevPoly tc) = False
+                          | otherwise            = check_kind ty
+    go (ForAllTy _ ty)                           = go ty
+    go (FunTy {})                                = False
+    go (LitTy {})                                = False
+    go ty@(CastTy {})                            = check_kind ty
+    go ty@(CoercionTy {})                        = pprPanic "isTypeLevPoly co" (ppr ty)
+
+    check_kind = isKindLevPoly . typeKind
+
+-- | Looking past all pi-types, is the end result potentially levity polymorphic?
+-- Example: True for (forall r (a :: TYPE r). String -> a)
+-- Example: False for (forall r1 r2 (a :: TYPE r1) (b :: TYPE r2). a -> b -> Type)
+resultIsLevPoly :: Type -> Bool
+resultIsLevPoly = isTypeLevPoly . snd . splitPiTys
 
 {-
 %************************************************************************

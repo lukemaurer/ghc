@@ -90,7 +90,7 @@ module TcSMonad (
     instDFunType,                              -- Instantiation
 
     -- MetaTyVars
-    newFlexiTcSTy, instFlexiTcS,
+    newFlexiTcSTy, instFlexi, instFlexiX,
     cloneMetaTyVar, demoteUnfilledFmv,
 
     TcLevel, isTouchableMetaTyVarTcS,
@@ -423,7 +423,7 @@ emptyInert
 
 {- Note [Solved dictionaries]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When we apply a top-level instance declararation, we add the "solved"
+When we apply a top-level instance declaration, we add the "solved"
 dictionary to the inert_solved_dicts.  In general, we use it to avoid
 creating a new EvVar when we have a new goal that we have solved in
 the past.
@@ -840,7 +840,7 @@ The idea is that
 
 * (K2) is about inertness.  Intuitively, any infinite chain T^0(f,t),
   T^1(f,t), T^2(f,T).... must pass through the new work item infnitely
-  often, since the substution without the work item is inert; and must
+  often, since the substitution without the work item is inert; and must
   pass through at least one of the triples in S infnitely often.
 
   - (K2a): if not(fs>=fs) then there is no f that fs can rewrite (fs>=f),
@@ -855,7 +855,7 @@ The idea is that
   - (K2c): If this holds, we can't pass through this triple infinitely
     often, because if we did then fs>=f, fw>=f, hence by (R2)
       * either fw>=fs, contradicting K2c
-      * or fs>=fw; so by the agument in K2b we can't have a loop
+      * or fs>=fw; so by the argument in K2b we can't have a loop
 
   - (K2d): if a not in s, we hae no further opportunity to apply the
     work item, similar to (K2b)
@@ -1279,7 +1279,7 @@ lookupFlattenTyVar ieqs ftv
 
 {- Note [lookupFlattenTyVar]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Supppose we have an injective function F and
+Suppose we have an injective function F and
   inert_funeqs:   F t1 ~ fsk1
                   F t2 ~ fsk2
   inert_eqs:      fsk1 ~ fsk2
@@ -2790,21 +2790,21 @@ demoteUnfilledFmv fmv
                    do { tv_ty <- TcM.newFlexiTyVarTy (tyVarKind fmv)
                       ; TcM.writeMetaTyVar fmv tv_ty } }
 
-instFlexiTcS :: [TKVar] -> TcS (TCvSubst, [TcType])
-instFlexiTcS tvs = wrapTcS (mapAccumLM inst_one emptyTCvSubst tvs)
-  where
-     inst_one subst tv
-         = do { ty' <- instFlexiTcSHelper (tyVarName tv)
-                                          (substTyUnchecked subst (tyVarKind tv))
-              ; return (extendTvSubst subst tv ty', ty') }
+instFlexi :: [TKVar] -> TcS TCvSubst
+instFlexi = instFlexiX emptyTCvSubst
 
-instFlexiTcSHelper :: Name -> Kind -> TcM TcType
-instFlexiTcSHelper tvname kind
+instFlexiX :: TCvSubst -> [TKVar] -> TcS TCvSubst
+instFlexiX subst tvs
+  = wrapTcS (foldlM instFlexiHelper subst tvs)
+
+instFlexiHelper :: TCvSubst -> TKVar -> TcM TCvSubst
+instFlexiHelper subst tv
   = do { uniq <- TcM.newUnique
        ; details <- TcM.newMetaDetails TauTv
-       ; let name = setNameUnique tvname uniq
-       ; return (mkTyVarTy (mkTcTyVar name kind details)) }
-
+       ; let name = setNameUnique (tyVarName tv) uniq
+             kind = substTyUnchecked subst (tyVarKind tv)
+             ty'  = mkTyVarTy (mkTcTyVar name kind details)
+       ; return (extendTvSubst subst tv ty') }
 
 
 -- Creating and setting evidence variables and CtFlavors

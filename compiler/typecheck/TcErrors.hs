@@ -33,8 +33,7 @@ import HsBinds ( PatSynBind(..) )
 import Name
 import RdrName ( lookupGlobalRdrEnv, lookupGRE_Name, GlobalRdrEnv
                , mkRdrUnqual, isLocalGRE, greSrcSpan )
-import PrelNames ( typeableClassName, hasKey, ptrRepLiftedDataConKey
-                 , ptrRepUnliftedDataConKey )
+import PrelNames ( typeableClassName, hasKey, liftedRepDataConKey )
 import Id
 import Var
 import VarSet
@@ -1067,9 +1066,8 @@ mkHoleError ctxt ct@(CHoleCan { cc_hole = hole })
     loc_msg tv
        | isTyVar tv
        = case tcTyVarDetails tv of
-          SkolemTv {} -> pprSkol (cec_encl ctxt) tv
-          MetaTv {}   -> quotes (ppr tv) <+> text "is an ambiguous type variable"
-          det -> pprTcTyVarDetails det
+           MetaTv {} -> quotes (ppr tv) <+> text "is an ambiguous type variable"
+           _         -> extraTyVarInfo ctxt tv
        | otherwise
        = sdocWithDynFlags $ \dflags ->
          if gopt Opt_PrintExplicitCoercions dflags
@@ -1449,7 +1447,7 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
      -- the cases below don't really apply to ReprEq (except occurs check)
   = mkErrorMsgFromCt ctxt ct $ mconcat
         [ important $ misMatchOrCND ctxt ct oriented ty1 ty2
-        , important $ extraTyVarInfo ctxt tv1 ty2
+        , important $ extraTyVarEqInfo ctxt tv1 ty2
         , report
         ]
 
@@ -1465,7 +1463,7 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
              extra2 = important $ mkEqInfoMsg ct ty1 ty2
 
              interesting_tyvars
-               = filter (not . isEmptyVarSet . tyCoVarsOfType . tyVarKind) $
+               = filter (not . noFreeVarsOfType . tyVarKind) $
                  filter isTyVar $
                  fvVarList $
                  tyCoFVsOfType ty1 `unionFV` tyCoFVsOfType ty2
@@ -1497,7 +1495,7 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
   , tv1 `elem` skols
   = mkErrorMsgFromCt ctxt ct $ mconcat
         [ important $ misMatchMsg ct oriented ty1 ty2
-        , important $ extraTyVarInfo ctxt tv1 ty2
+        , important $ extraTyVarEqInfo ctxt tv1 ty2
         , report
         ]
 
@@ -1538,7 +1536,7 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
                       , nest 2 $ text "inside the constraints:" <+> pprEvVarTheta given
                       , nest 2 $ text "bound by" <+> ppr skol_info
                       , nest 2 $ text "at" <+> ppr (tcl_loc env) ]
-             tv_extra = important $ extraTyVarInfo ctxt tv1 ty2
+             tv_extra = important $ extraTyVarEqInfo ctxt tv1 ty2
              add_sig  = important $ suggestAddSig ctxt ty1 ty2
        ; mkErrorMsgFromCt ctxt ct $ mconcat
             [msg, tclvl_extra, tv_extra, add_sig, report] }
@@ -1641,24 +1639,27 @@ pp_givens givens
                 2 (sep [ text "bound by" <+> ppr skol_info
                        , text "at" <+> ppr (tcl_loc env) ])
 
-extraTyVarInfo :: ReportErrCtxt -> TcTyVar -> TcType -> SDoc
+extraTyVarEqInfo :: ReportErrCtxt -> TcTyVar -> TcType -> SDoc
 -- Add on extra info about skolem constants
 -- NB: The types themselves are already tidied
-extraTyVarInfo ctxt tv1 ty2
-  = tv_extra tv1 $$ ty_extra ty2
+extraTyVarEqInfo ctxt tv1 ty2
+  = extraTyVarInfo ctxt tv1 $$ ty_extra ty2
   where
-    implics = cec_encl ctxt
     ty_extra ty = case tcGetTyVar_maybe ty of
-                    Just tv -> tv_extra tv
+                    Just tv -> extraTyVarInfo ctxt tv
                     Nothing -> empty
 
-    tv_extra tv
-      | let pp_tv = quotes (ppr tv)
-      = case tcTyVarDetails tv of
+extraTyVarInfo :: ReportErrCtxt -> TcTyVar -> SDoc
+extraTyVarInfo ctxt tv
+  = ASSERT2( isTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
           SkolemTv {}   -> pprSkol implics tv
           FlatSkol {}   -> pp_tv <+> text "is a flattening type variable"
           RuntimeUnk {} -> pp_tv <+> text "is an interactive-debugger skolem"
           MetaTv {}     -> empty
+  where
+    implics = cec_encl ctxt
+    pp_tv = quotes (ppr tv)
 
 suggestAddSig :: ReportErrCtxt -> TcType -> TcType -> SDoc
 -- See Note [Suggest adding a type signature]
@@ -1687,20 +1688,14 @@ misMatchMsg ct oriented ty1 ty2
   = misMatchMsg ct (Just IsSwapped) ty2 ty1
 
   -- These next two cases are when we're about to report, e.g., that
-  -- 'PtrRepLifted doesn't match 'VoidRep. Much better just to say
+  -- 'LiftedRep doesn't match 'VoidRep. Much better just to say
   -- lifted vs. unlifted
   | Just (tc1, []) <- splitTyConApp_maybe ty1
-  , tc1 `hasKey` ptrRepLiftedDataConKey
+  , tc1 `hasKey` liftedRepDataConKey
   = lifted_vs_unlifted
 
   | Just (tc2, []) <- splitTyConApp_maybe ty2
-  , tc2 `hasKey` ptrRepLiftedDataConKey
-  = lifted_vs_unlifted
-
-  | Just (tc1, []) <- splitTyConApp_maybe ty1
-  , Just (tc2, []) <- splitTyConApp_maybe ty2
-  ,    (tc1 `hasKey` ptrRepLiftedDataConKey && tc2 `hasKey` ptrRepUnliftedDataConKey)
-    || (tc1 `hasKey` ptrRepUnliftedDataConKey && tc2 `hasKey` ptrRepLiftedDataConKey)
+  , tc2 `hasKey` liftedRepDataConKey
   = lifted_vs_unlifted
 
   | otherwise  -- So now we have Nothing or (Just IsSwapped)
@@ -2754,7 +2749,7 @@ relevantBindings want_filtering ctxt ct
 
                  else if run_out n_left && id_tvs `subVarSet` tvs_seen
                           -- We've run out of n_left fuel and this binding only
-                          -- mentions aleady-seen type variables, so discard it
+                          -- mentions already-seen type variables, so discard it
                  then go tidy_env ct_tvs n_left tvs_seen docs
                          True      -- Record that we have now discarded something
                          tc_bndrs

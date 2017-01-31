@@ -175,8 +175,9 @@ There are some restrictions on the use of primitive types:
    binding.
 
 -  You may bind unboxed variables in a (non-recursive, non-top-level)
-   pattern binding, but you must make any such pattern-match strict. For
-   example, rather than:
+   pattern binding, but you must make any such pattern-match strict.
+   (Failing to do so emits a warning :ghc-flag:`-Wunbanged-strict-patterns`.)
+   For example, rather than:
 
    ::
 
@@ -226,10 +227,6 @@ In particular, the ``IO`` and ``ST`` monads use unboxed tuples to avoid
 unnecessary allocation during sequences of operations.
 
 There are some restrictions on the use of unboxed tuples:
-
--  Values of unboxed tuple types are subject to the same restrictions as
-   other unboxed types; i.e. they may not be stored in polymorphic data
-   structures or passed to polymorphic functions.
 
 -  The typical use of unboxed tuples is simply to return multiple
    values, binding those multiple results with a ``case`` expression,
@@ -4515,6 +4512,10 @@ synonyms, there is no restriction on the right-hand side pattern.
 
 Pattern synonyms cannot be defined recursively.
 
+:ref:`complete-pragma` can be specified in order to tell
+the pattern match exhaustiveness checker that a set of pattern synonyms is
+complete.
+
 .. _patsyn-impexp:
 
 Import and export of pattern synonyms
@@ -4890,6 +4891,59 @@ the original type ``[a]`` of ``enum`` still applies. When giving an
 empty instance, however, the default implementation ``map to genum`` is
 filled-in, and type-checked with the type
 ``(Generic a, GEnum (Rep a)) => [a]``.
+
+The type signature for a default method of a type class must take on the same
+form as the corresponding main method's type signature. Otherwise, the
+typechecker will reject that class's definition. By "take on the same form", we
+mean that the default type signature should differ from the main type signature
+only in their contexts. Therefore, if you have a method ``bar``: ::
+
+      class Foo a where
+        bar :: forall b. C => a -> b -> b
+
+Then a default method for ``bar`` must take on the form: ::
+
+      default bar :: forall b. C' => a -> b -> b
+
+``C`` is allowed to be different from ``C'``, but the right-hand sides of the
+type signatures must coincide. We require this because when you declare an
+empty instance for a class that uses :ghc-flag:`-XDefaultSignatures`, GHC
+implicitly fills in the default implementation like this: ::
+
+      instance Foo Int where
+        bar = default_bar @Int
+
+Where ``@Int`` utilizes visible type application
+(:ref:`visible-type-application`) to instantiate the ``b`` in
+``default bar :: forall b. C' => a -> b -> b``. In order for this type
+application to work, the default type signature for ``bar`` must have the same
+type variable order as the non-default signature! But there is no obligation
+for ``C`` and ``C'`` to be the same (see, for instance, the ``Enum`` example
+above, which relies on this).
+
+To further explain this example, the right-hand side of the default
+type signature for ``bar`` must be something that is alpha-equivalent to
+``forall b. a -> b -> b`` (where ``a`` is bound by the class itself, and is
+thus free in the methods' type signatures). So this would also be an acceptable
+default type signature: ::
+
+      default bar :: forall x. C' => a -> x -> x
+
+But not this (since the free variable ``a`` is in the wrong place): ::
+
+      default bar :: forall b. C' => b -> a -> b
+
+Nor this, since we can't match the type variable ``b`` with the concrete type
+``Int``: ::
+
+      default bar :: C' => a -> Int -> Int
+
+That last one deserves a special mention, however, since ``a -> Int -> Int`` is
+a straightforward instantiation of ``forall b. a -> b -> b``. You can still
+write such a default type signature, but you now must use type equalities to
+do so: ::
+
+      default bar :: forall b. (C', b ~ Int) => a -> b -> b
 
 We use default signatures to simplify generic programming in GHC
 (:ref:`generic-programming`).
@@ -8015,47 +8069,42 @@ these flags, especially :ghc-flag:`-fprint-explicit-kinds`.
 
 .. index::
    single: TYPE
-   single: representation polymorphism
+   single: levity polymorphism
 
 .. _runtime-rep:
 
-Runtime representation polymorphism
-===================================
+Levity polymorphism
+===================
 
 In order to allow full flexibility in how kinds are used, it is necessary
 to use the kind system to differentiate between boxed, lifted types
 (normal, everyday types like ``Int`` and ``[Bool]``) and unboxed, primitive
-types (:ref:`primitives`) like ``Int#``. We thus have so-called representation
+types (:ref:`primitives`) like ``Int#``. We thus have so-called levity
 polymorphism.
-
-.. note::
-   For quite some time, this idea was known as *levity* polymorphism, when
-   it differentiated between only lifted and unlifted types. Now that it
-   differentiates between any runtime representations, the name has been
-   changed. But anything you've read or heard about levity polymorphism
-   likely applies to the story told here -- this is just a small generalisation.
 
 Here are the key definitions, all available from ``GHC.Exts``: ::
 
   TYPE :: RuntimeRep -> *   -- highly magical, built into GHC
 
-  data RuntimeRep = PtrRepLifted     -- for things like `Int`
-                  | PtrRepUnlifted   -- for things like `Array#`
-                  | IntRep           -- for things like `Int#`
+  data RuntimeRep = LiftedRep     -- for things like `Int`
+                  | UnliftedRep   -- for things like `Array#`
+                  | IntRep        -- for `Int#`
+		  | TupleRep [RuntimeRep]  -- unboxed tuples, indexed by the representations of the elements
+		  | SumRep [RuntimeRep]    -- unboxed sums, indexed by the representations of the disjuncts
                   | ...
 
-  type * = TYPE PtrRepLifted    -- * is just an ordinary type synonym
+  type * = TYPE LiftedRep    -- * is just an ordinary type synonym
 
 The idea is that we have a new fundamental type constant ``TYPE``, which
 is parameterised by a ``RuntimeRep``. We thus get ``Int# :: TYPE 'IntRep``
-and ``Bool :: TYPE 'PtrRepLifted``. Anything with a type of the form
+and ``Bool :: TYPE 'LiftedRep``. Anything with a type of the form
 ``TYPE x`` can appear to either side of a function arrow ``->``. We can
 thus say that ``->`` has type
-``TYPE r1 -> TYPE r2 -> TYPE 'PtrRepLifted``. The result is always lifted
+``TYPE r1 -> TYPE r2 -> TYPE 'LiftedRep``. The result is always lifted
 because all functions are lifted in GHC.
 
-No representation-polymorphic variables
----------------------------------------
+No levity-polymorphic variables or arguments
+--------------------------------------------
 
 If GHC didn't have to compile programs that run in the real world, that
 would be the end of the story. But representation polymorphism can cause
@@ -8072,10 +8121,10 @@ In particular, when we call ``bad``, we must somehow pass ``x`` into
 ``bad``. How wide (that is, how many bits) is ``x``? Is it a pointer?
 What kind of register (floating-point or integral) should ``x`` go in?
 It's all impossible to say, because ``x``'s type, ``TYPE r2`` is
-representation polymorphic. We thus forbid such constructions, via the
+levity polymorphic. We thus forbid such constructions, via the
 following straightforward rule:
 
-    No variable may have a representation-polymorphic type.
+    No variable may have a levity-polymorphic type.
 
 This eliminates ``bad`` because the variable ``x`` would have a
 representation-polymorphic type.
@@ -8086,15 +8135,20 @@ However, not all is lost. We can still do this: ::
          (a -> b) -> a -> b
   f $ x = f x
 
-Here, only ``b`` is representation polymorphic. There are no variables
-with a representation polymorphic type. And the code generator has no
+Here, only ``b`` is levity polymorphic. There are no variables
+with a levity-polymorphic type. And the code generator has no
 trouble with this. Indeed, this is the true type of GHC's ``$`` operator,
 slightly more general than the Haskell 98 version.
 
-Representation-polymorphic bottoms
-----------------------------------
+Because the code generator must store and move arguments as well
+as variables, the logic above applies equally well to function arguments,
+which may not be levity-polymorphic.
 
-We can use representation polymorphism to good effect with ``error``
+
+Levity-polymorphic bottoms
+--------------------------
+
+We can use levity polymorphism to good effect with ``error``
 and ``undefined``, whose types are given here: ::
 
   undefined :: forall (r :: RuntimeRep) (a :: TYPE r).
@@ -8102,25 +8156,25 @@ and ``undefined``, whose types are given here: ::
   error :: forall (r :: RuntimeRep) (a :: TYPE r).
            HasCallStack => String -> a
 
-These functions do not bind a representation-polymorphic variable, and
+These functions do not bind a levity-polymorphic variable, and
 so are accepted. Their polymorphism allows users to use these to conveniently
 stub out functions that return unboxed types.
 
-Printing representation-polymorphic types
------------------------------------------
+Printing levity-polymorphic types
+---------------------------------
 
 .. ghc-flag:: -Wprint-explicit-runtime-rep
 
   Print ``RuntimeRep`` parameters as they appear; otherwise, they are
-  defaulted to ``'PtrRepLifted``.
+  defaulted to ``'LiftedRep``.
 
-Most GHC users will not need to worry about representation polymorphism
-or unboxed types. For these users, see the representation polymorphism
+Most GHC users will not need to worry about levity polymorphism
+or unboxed types. For these users, seeing the levity polymorphism
 in the type of ``$`` is unhelpful. And thus, by default, it is suppressed,
-by supposing all type variables of type ``RuntimeType`` to be ``'PtrRepLifted``
-when printing, and printing ``TYPE 'PtrRepLifted`` as ``*``.
+by supposing all type variables of type ``RuntimeRep`` to be ``'LiftedRep``
+when printing, and printing ``TYPE 'LiftedRep`` as ``*``.
 
-Should you wish to see representation polymorphism in your types, enable
+Should you wish to see levity polymorphism in your types, enable
 the flag :ghc-flag:`-fprint-explicit-runtime-reps`.
 
 .. _type-level-literals:
@@ -11564,7 +11618,7 @@ optionally had by adding ``!`` in front of a variable.
 
        case x of !y -> rhs
 
-   which evalutes ``x``. Similarly, if ``newtype Age = MkAge Int``, then ::
+   which evaluates ``x``. Similarly, if ``newtype Age = MkAge Int``, then ::
 
        case x of MkAge i -> rhs
 
@@ -12761,6 +12815,80 @@ field of the constructor ``T`` is not unpacked.
 The ``{-# SOURCE #-}`` pragma is used only in ``import`` declarations,
 to break a module loop. It is described in detail in
 :ref:`mutual-recursion`.
+
+.. _complete-pragma:
+
+``COMPLETE`` pragmas
+--------------------
+
+The ``COMPLETE`` pragma is used to inform the pattern match checker that a
+certain set of patterns is complete and that any function which matches
+on all the specified patterns is total.
+
+The most common usage of ``COMPLETE`` pragmas is with
+:ref:`pattern-synonyms`.
+On its own, the checker is very naive and assumes that any match involving
+a pattern synonym will fail. As a result, any pattern match on a
+pattern synonym is regarded as
+incomplete unless the user adds a catch-all case.
+
+For example, the data types ``2 * A`` and ``A + A`` are isomorphic but some
+computations are more naturally expressed in terms of one or the other. To
+get the best of both worlds, we can choose one as our implementation and then
+provide a set of pattern synonyms so that users can use the other representation
+if they desire. We can then specify a ``COMPLETE`` pragma in order to
+inform the pattern match checker that a function which matches on both ``LeftChoice``
+and ``RightChoice`` is total.
+
+::
+
+  data Choice a = Choice Bool a
+
+  pattern LeftChoice :: a -> Choice a
+  pattern LeftChoice a = Choice False a
+
+  pattern RightChoice :: a -> Choice a
+  pattern RightChoice a = Choice True a
+
+  {-# COMPLETE LeftChoice, RightChoice #-}
+
+  foo :: Choice Int -> Int
+  foo (LeftChoice n) = n * 2
+  foo (RightChoice n) = n - 2
+
+``COMPLETE`` pragmas are only used by the pattern match checker. If a function
+definition matches on all the constructors specified in the pragma then the
+compiler will produce no warning.
+
+``COMPLETE`` pragmas can contain any data constructors or pattern synonyms
+which are in scope. Once defined, they are automatically imported and exported
+from modules. ``COMPLETE`` pragmas should be thought of as asserting a universal
+truth about a set of patterns and as a result, should not be used to silence
+context specific incomplete match warnings.
+
+When specifing a ``COMPLETE`` pragma, the result types of all patterns must
+be consistent with each other. This is a sanity check as it would be impossible
+to match on all the patterns if the types were inconsistent.
+
+The result type must also be unambiguous. Usually this can be inferred but
+when all the pattern synonyms in a group are polymorphic in the constructor
+the user must provide a type signature.
+
+::
+  class LL f where
+    go :: f a -> ()
+
+  instance LL [] where
+    go _ = ()
+
+  pattern T :: LL f => f a
+  pattern T <- (go -> ())
+
+  {-# COMPLETE T :: [] #-}
+
+  -- No warning
+  foo :: [a] -> Int
+  foo T = 5
 
 .. _overlap-pragma:
 

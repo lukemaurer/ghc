@@ -177,7 +177,8 @@ import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
 import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn
-                               , getCaretDiagnostic )
+                               , getCaretDiagnostic, dumpSDoc )
+import Json
 import SysTools.Terminal ( stderrSupportsAnsiColors )
 
 import System.IO.Unsafe ( unsafePerformIO )
@@ -214,12 +215,7 @@ import qualified Data.IntSet as IntSet
 import GHC.Foreign (withCString, peekCString)
 import qualified GHC.LanguageExtensions as LangExt
 
-#if __GLASGOW_HASKELL__ >= 709
-import Foreign
-#else
-import Foreign.Safe
-#endif
-
+import Foreign (Ptr) -- needed for 2nd stage
 
 -- Note [Updating flag description in the User's Guide]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -344,6 +340,7 @@ data DumpFlag
    | Opt_D_dump_simpl_trace
    | Opt_D_dump_occur_anal
    | Opt_D_dump_parsed
+   | Opt_D_dump_parsed_ast
    | Opt_D_dump_rn
    | Opt_D_dump_shape
    | Opt_D_dump_simpl
@@ -383,6 +380,7 @@ data DumpFlag
    | Opt_D_dump_view_pattern_commoning
    | Opt_D_verbose_core2core
    | Opt_D_dump_debug
+   | Opt_D_dump_json
 
    deriving (Eq, Show, Enum)
 
@@ -568,6 +566,14 @@ data GeneralFlag
 -- displayed. If a warning isn't controlled by a flag, this is made
 -- explicit at the point of use.
 data WarnReason = NoReason | Reason !WarningFlag
+  deriving Show
+
+instance Outputable WarnReason where
+  ppr = text . show
+
+instance ToJson WarnReason where
+  json NoReason = JSNull
+  json (Reason wf) = JSString (show wf)
 
 data WarningFlag =
 -- See Note [Updating flag description in the User's Guide]
@@ -635,6 +641,8 @@ data WarningFlag =
    | Opt_WarnUnrecognisedWarningFlags     -- since 8.0
    | Opt_WarnSimplifiableClassConstraints -- Since 8.2
    | Opt_WarnCPPUndef                     -- Since 8.2
+   | Opt_WarnUnbangedStrictPatterns       -- Since 8.2
+   | Opt_WarnMissingHomeModules           -- Since 8.2
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -860,7 +868,9 @@ data DynFlags = DynFlags {
   ghciHistSize          :: Int,
 
   -- | MsgDoc output action: use "ErrUtils" instead of this if you can
+  initLogAction         :: IO (Maybe LogOutput),
   log_action            :: LogAction,
+  log_finaliser         :: LogFinaliser,
   flushOut              :: FlushOut,
   flushErr              :: FlushErr,
 
@@ -1627,7 +1637,13 @@ defaultDynFlags mySettings =
 
         ghciHistSize = 50, -- keep a log of length 50 by default
 
+        -- Logging
+
+        initLogAction = defaultLogOutput,
+
         log_action = defaultLogAction,
+        log_finaliser = \ _ -> return (),
+
         flushOut = defaultFlushOut,
         flushErr = defaultFlushErr,
         pprUserLength = 5,
@@ -1680,8 +1696,29 @@ interpreterDynamic dflags
   | otherwise = dynamicGhc
 
 --------------------------------------------------------------------------
+--
+-- Note [JSON Error Messages]
+--
+-- When the user requests the compiler output to be dumped as json
+-- we modify the log_action to collect all the messages in an IORef
+-- and then finally in GHC.withCleanupSession the log_finaliser is
+-- called which prints out the messages together.
+--
+-- Before the compiler calls log_action, it has already turned the `ErrMsg`
+-- into a formatted message. This means that we lose some possible
+-- information to provide to the user but refactoring log_action is quite
+-- invasive as it is called in many places. So, for now I left it alone
+-- and we can refine its behaviour as users request different output.
 
 type FatalMessager = String -> IO ()
+
+data LogOutput = LogOutput
+               { getLogAction :: LogAction
+               , getLogFinaliser :: LogFinaliser
+               }
+
+defaultLogOutput :: IO (Maybe LogOutput)
+defaultLogOutput = return $ Nothing
 
 type LogAction = DynFlags
               -> WarnReason
@@ -1691,8 +1728,42 @@ type LogAction = DynFlags
               -> MsgDoc
               -> IO ()
 
+type LogFinaliser = DynFlags -> IO ()
+
 defaultFatalMessager :: FatalMessager
 defaultFatalMessager = hPutStrLn stderr
+
+
+-- See Note [JSON Error Messages]
+jsonLogOutput :: IO (Maybe LogOutput)
+jsonLogOutput = do
+  ref <- newIORef []
+  return . Just $ LogOutput (jsonLogAction ref) (jsonLogFinaliser ref)
+
+jsonLogAction :: IORef [SDoc] -> LogAction
+jsonLogAction iref dflags reason severity srcSpan style msg
+  = do
+      addMessage . withPprStyle (mkCodeStyle CStyle) . renderJSON $
+        JSObject [ ( "span", json srcSpan )
+                 , ( "doc" , JSString (showSDoc dflags msg) )
+                 , ( "severity", json severity )
+                 , ( "reason" ,   json reason )
+                ]
+      defaultLogAction dflags reason severity srcSpan style msg
+  where
+    addMessage m = modifyIORef iref (m:)
+
+
+jsonLogFinaliser :: IORef [SDoc] -> DynFlags -> IO ()
+jsonLogFinaliser iref dflags = do
+  msgs <- readIORef iref
+  let fmt_msgs = brackets $ pprWithCommas (blankLine $$) msgs
+  output fmt_msgs
+  where
+    -- dumpSDoc uses log_action to output the dump
+    dflags' = dflags { log_action = defaultLogAction }
+    output doc = dumpSDoc dflags' neverQualify Opt_D_dump_json "" doc
+
 
 defaultLogAction :: LogAction
 defaultLogAction dflags reason severity srcSpan style msg
@@ -2061,6 +2132,9 @@ setOutputFile f d = d { outputFile = f}
 setDynOutputFile f d = d { dynOutputFile = f}
 setOutputHi   f d = d { outputHi   = f}
 
+setJsonLogAction :: DynFlags -> DynFlags
+setJsonLogAction d = d { initLogAction = jsonLogOutput }
+
 thisComponentId :: DynFlags -> ComponentId
 thisComponentId dflags =
   case thisComponentId_ dflags of
@@ -2284,9 +2358,26 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
     Just x -> liftIO (setHeapSize x)
     _      -> return ()
 
-  liftIO $ setUnsafeGlobalDynFlags dflags6
+  dflags7 <- liftIO $ setLogAction dflags6
 
-  return (dflags6, leftover, consistency_warnings ++ sh_warns ++ warns)
+  liftIO $ setUnsafeGlobalDynFlags dflags7
+
+  return (dflags7, leftover, consistency_warnings ++ sh_warns ++ warns)
+
+setLogAction :: DynFlags -> IO DynFlags
+setLogAction dflags = do
+ mlogger <- initLogAction dflags
+ return $
+    maybe
+         dflags
+         (\logger ->
+            dflags
+              { log_action    = getLogAction logger
+              , log_finaliser = getLogFinaliser logger
+              , initLogAction = return $ Nothing -- Don't initialise it twice
+              })
+         mlogger
+
 
 updateWays :: DynFlags -> DynFlags
 updateWays dflags
@@ -2785,6 +2876,8 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_occur_anal)
   , make_ord_flag defGhcFlag "ddump-parsed"
         (setDumpFlag Opt_D_dump_parsed)
+  , make_ord_flag defGhcFlag "ddump-parsed-ast"
+        (setDumpFlag Opt_D_dump_parsed_ast)
   , make_ord_flag defGhcFlag "ddump-rn"
         (setDumpFlag Opt_D_dump_rn)
   , make_ord_flag defGhcFlag "ddump-simpl"
@@ -2886,6 +2979,9 @@ dynamic_flags_deps = [
   , make_ord_flag defGhcFlag "dno-llvm-mangler"
         (NoArg (setGeneralFlag Opt_NoLlvmMangler)) -- hidden flag
   , make_ord_flag defGhcFlag "ddump-debug"        (setDumpFlag Opt_D_dump_debug)
+
+  , make_ord_flag defGhcFlag "ddump-json"
+        (noArg (flip dopt_set Opt_D_dump_json . setJsonLogAction ) )
 
         ------ Machine dependent (-m<blah>) stuff ---------------------------
 
@@ -3365,6 +3461,7 @@ wWarningFlagsDeps = [
   depFlagSpec "auto-orphans"             Opt_WarnAutoOrphans
     "it has no effect",
   flagSpec "cpp-undef"                   Opt_WarnCPPUndef,
+  flagSpec "unbanged-strict-patterns"    Opt_WarnUnbangedStrictPatterns,
   flagSpec "deferred-type-errors"        Opt_WarnDeferredTypeErrors,
   flagSpec "deferred-out-of-scope-variables"
                                          Opt_WarnDeferredOutOfScopeVariables,
@@ -3439,6 +3536,7 @@ wWarningFlagsDeps = [
   flagSpec "missing-pattern-synonym-signatures"
                                     Opt_WarnMissingPatternSynonymSignatures,
   flagSpec "simplifiable-class-constraints" Opt_WarnSimplifiableClassConstraints,
+  flagSpec "missing-home-modules"        Opt_WarnMissingHomeModules,
   flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
@@ -4064,7 +4162,8 @@ minusWOpts
         Opt_WarnUnusedImports,
         Opt_WarnIncompletePatterns,
         Opt_WarnDodgyExports,
-        Opt_WarnDodgyImports
+        Opt_WarnDodgyImports,
+        Opt_WarnUnbangedStrictPatterns
       ]
 
 -- | Things you get with -Wall
@@ -4605,7 +4704,7 @@ interpretPackageEnv dflags = do
     envError env = liftMaybeT . throwGhcExceptionIO . CmdLineError $
          "Package environment "
       ++ show env
-      ++ " (specified in GHC_ENVIRIONMENT) not found"
+      ++ " (specified in GHC_ENVIRONMENT) not found"
 
 
 -- If we're linking a binary, then only targets that produce object

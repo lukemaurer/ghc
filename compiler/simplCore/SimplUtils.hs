@@ -65,6 +65,7 @@ import PrelRules
 import Literal
 
 import Control.Monad    ( when )
+import Data.List        ( sortBy )
 
 {-
 ************************************************************************
@@ -455,15 +456,22 @@ mkArgInfo fun rules n_val_args call_cont
     -- add_type_str is done repeatedly (for each call); might be better
     -- once-for-all in the function
     -- But beware primops/datacons with no strictness
-    add_type_str _ [] = []
-    add_type_str fun_ty strs            -- Look through foralls
-        | Just (_, fun_ty') <- splitForAllTy_maybe fun_ty       -- Includes coercions
-        = add_type_str fun_ty' strs
-    add_type_str fun_ty (str:strs)      -- Add strict-type info
-        | Just (arg_ty, fun_ty') <- splitFunTy_maybe fun_ty
-        = (str || isStrictType arg_ty) : add_type_str fun_ty' strs
-    add_type_str _ strs
-        = strs
+
+    add_type_str
+      = go
+      where
+        go _ [] = []
+        go fun_ty strs            -- Look through foralls
+            | Just (_, fun_ty') <- splitForAllTy_maybe fun_ty       -- Includes coercions
+            = go fun_ty' strs
+        go fun_ty (str:strs)      -- Add strict-type info
+            | Just (arg_ty, fun_ty') <- splitFunTy_maybe fun_ty
+            = (str || Just False == isLiftedType_maybe arg_ty) : go fun_ty' strs
+               -- If the type is levity-polymorphic, we can't know whether it's
+               -- strict. isLiftedType_maybe will return Just False only when
+               -- we're sure the type is unlifted.
+        go _ strs
+            = strs
 
 {- Note [Unsaturated functions]
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1128,7 +1136,7 @@ only have *forward* references. Hence, it's safe to discard the binding
 
 NOTE: This isn't our last opportunity to inline.  We're at the binding
 site right now, and we'll get another opportunity when we get to the
-ocurrence(s)
+occurrence(s)
 
 Note that we do this unconditional inlining only for trival RHSs.
 Don't inline even WHNFs inside lambdas; doing so may simply increase
@@ -1931,8 +1939,8 @@ mkCase1 dflags scrut bndr alts_ty alts = mkCase2 dflags scrut bndr alts_ty alts
 
 mkCase2 dflags scrut bndr alts_ty alts
   | gopt Opt_CaseFolding dflags
-  , Just (scrut',f) <- caseRules scrut
-  = mkCase3 dflags scrut' bndr alts_ty (map (mapAlt f) alts)
+  , Just (scrut',f) <- caseRules dflags scrut
+  = mkCase3 dflags scrut' bndr alts_ty (new_alts f)
   | otherwise
   = mkCase3 dflags scrut bndr alts_ty alts
   where
@@ -1951,6 +1959,9 @@ mkCase2 dflags scrut bndr alts_ty alts
     wrap_rhs l rhs
       | isDeadBinder bndr = rhs
       | otherwise         = Let (NonRec bndr l) rhs
+
+    -- We need to re-sort the alternatives to preserve the #case_invariants#
+    new_alts f = sortBy cmpAlt (map (mapAlt f) alts)
 
     mapAlt f alt@(c,bs,e) = case c of
       DEFAULT          -> (c, bs, wrap_rhs scrut e)

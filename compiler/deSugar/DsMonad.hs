@@ -12,10 +12,11 @@
 module DsMonad (
         DsM, mapM, mapAndUnzipM,
         initDs, initDsTc, initTcDsForSolver, fixDs,
-        foldlM, foldrM, whenGOptM, unsetGOptM, unsetWOptM,
+        foldlM, foldrM, whenGOptM, unsetGOptM, unsetWOptM, xoptM,
         Applicative(..),(<$>),
 
-        duplicateLocalDs, newSysLocalDs, newSysLocalsDs, newUniqueId,
+        duplicateLocalDs, newSysLocalDsNoLP, newSysLocalDs,
+        newSysLocalsDsNoLP, newSysLocalsDs, newUniqueId,
         newFailLocalDs, newPredVarDs,
         getSrcSpanDs, putSrcSpanDs,
         mkPrintUnqualifiedDs,
@@ -34,22 +35,30 @@ module DsMonad (
         getDictsDs, addDictsDs, getTmCsDs, addTmCsDs,
 
         -- Iterations for pm checking
-        incrCheckPmIterDs, resetPmIterDs,
+        incrCheckPmIterDs, resetPmIterDs, dsGetCompleteMatches,
 
-        -- Warnings
-        DsWarning, warnDs, failWithDs, discardWarningsDs,
+        -- Warnings and errors
+        DsWarning, warnDs, warnIfSetDs, errDs, errDsCoreExpr,
+        failWithDs, failDs, discardWarningsDs,
+        askNoErrsDs,
 
         -- Data types
         DsMatchContext(..),
         EquationInfo(..), MatchResult(..), DsWrapper, idDsWrapper,
-        CanItFail(..), orFail
+        CanItFail(..), orFail,
+
+        -- Levity polymorphism
+        dsNoLevPoly, dsNoLevPolyExpr
     ) where
 
 import TcRnMonad
 import FamInstEnv
 import CoreSyn
+import MkCore    ( mkCoreTup )
+import CoreUtils ( exprType, isExprLevPoly )
 import HsSyn
 import TcIface
+import TcMType ( checkForLevPolyX, formatLevPolyErr )
 import LoadIface
 import Finder
 import PrelNames
@@ -74,6 +83,7 @@ import FastString
 import Maybes
 import Var (EvVar)
 import qualified GHC.LanguageExtensions as LangExt
+import UniqFM ( lookupWithDefaultUFM )
 
 import Data.IORef
 import Control.Monad
@@ -143,17 +153,19 @@ type DsWarning = (SrcSpan, SDoc)
 
 initDs :: HscEnv
        -> Module -> GlobalRdrEnv -> TypeEnv -> FamInstEnv
+       -> [CompleteMatch]
        -> DsM a
        -> IO (Messages, Maybe a)
 -- Print errors and warnings, if any arise
 
-initDs hsc_env mod rdr_env type_env fam_inst_env thing_inside
+initDs hsc_env mod rdr_env type_env fam_inst_env complete_matches thing_inside
   = do  { msg_var <- newIORef (emptyBag, emptyBag)
+        ; let all_matches = (hptCompleteSigs hsc_env) ++ complete_matches
         ; pm_iter_var      <- newIORef 0
         ; let dflags                   = hsc_dflags hsc_env
               (ds_gbl_env, ds_lcl_env) = mkDsEnvs dflags mod rdr_env type_env
                                                   fam_inst_env msg_var
-                                                  pm_iter_var
+                                                  pm_iter_var all_matches
 
         ; either_res <- initTcRnIf 'd' hsc_env ds_gbl_env ds_lcl_env $
                           loadDAP $
@@ -232,8 +244,9 @@ initDsTc thing_inside
         ; let type_env = tcg_type_env tcg_env
               rdr_env  = tcg_rdr_env tcg_env
               fam_inst_env = tcg_fam_inst_env tcg_env
+              complete_matches = tcg_complete_matches tcg_env
               ds_envs  = mkDsEnvs dflags this_mod rdr_env type_env fam_inst_env
-                                  msg_var pm_iter_var
+                                  msg_var pm_iter_var complete_matches
         ; setEnvs ds_envs thing_inside
         }
 
@@ -261,13 +274,15 @@ initTcDsForSolver thing_inside
          thing_inside }
 
 mkDsEnvs :: DynFlags -> Module -> GlobalRdrEnv -> TypeEnv -> FamInstEnv
-         -> IORef Messages -> IORef Int -> (DsGblEnv, DsLclEnv)
-mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
+         -> IORef Messages -> IORef Int -> [CompleteMatch]
+         -> (DsGblEnv, DsLclEnv)
+mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar complete_matches
   = let if_genv = IfGblEnv { if_doc       = text "mkDsEnvs",
                              if_rec_types = Just (mod, return type_env) }
         if_lenv = mkIfLclEnv mod (text "GHC error in desugarer lookup in" <+> ppr mod)
                              False -- not boot!
         real_span = realSrcLocSpan (mkRealSrcLoc (moduleNameFS (moduleName mod)) 1 1)
+        completeMatchMap = mkCompleteMatchMap complete_matches
         gbl_env = DsGblEnv { ds_mod     = mod
                            , ds_fam_inst_env = fam_inst_env
                            , ds_if_env  = (if_genv, if_lenv)
@@ -275,6 +290,7 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
                            , ds_msgs    = msg_var
                            , ds_dph_env = emptyGlobalRdrEnv
                            , ds_parr_bi = panic "DsMonad: uninitialised ds_parr_bi"
+                           , ds_complete_matches = completeMatchMap
                            }
         lcl_env = DsLclEnv { dsl_meta    = emptyNameEnv
                            , dsl_loc     = real_span
@@ -283,6 +299,7 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
                            , dsl_pm_iter = pmvar
                            }
     in (gbl_env, lcl_env)
+
 
 -- Attempt to load the given module and return its exported entities if successful.
 --
@@ -312,11 +329,51 @@ And all this mysterious stuff is so we can occasionally reach out and
 grab one or more names.  @newLocalDs@ isn't exported---exported
 functions are defined with it.  The difference in name-strings makes
 it easier to read debugging output.
+
+Note [Levity polymorphism checking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+According to the Levity Polymorphism paper
+<http://cs.brynmawr.edu/~rae/papers/2017/levity/levity.pdf>, levity
+polymorphism is forbidden in precisely two places: in the type of a bound
+term-level argument and in the type of an argument to a function. The paper
+explains it more fully, but briefly: expressions in these contexts need to be
+stored in registers, and it's hard (read, impossible) to store something
+that's levity polymorphic.
+
+We cannot check for bad levity polymorphism conveniently in the type checker,
+because we can't tell, a priori, which levity metavariables will be solved.
+At one point, I (Richard) thought we could check in the zonker, but it's hard
+to know where precisely are the abstracted variables and the arguments. So
+we check in the desugarer, the only place where we can see the Core code and
+still report respectable syntax to the user. This covers the vast majority
+of cases; see calls to DsMonad.dsNoLevPoly and friends.
+
+Levity polymorphism is also prohibited in the types of binders, and the
+desugarer checks for this in GHC-generated Ids. (The zonker handles
+the user-writted ids in zonkIdBndr.) This is done in newSysLocalDsNoLP.
+The newSysLocalDs variant is used in the vast majority of cases where
+the binder is obviously not levity polymorphic, omitting the check.
+It would be nice to ASSERT that there is no levity polymorphism here,
+but we can't, because of the fixM in DsArrows. It's all OK, though:
+Core Lint will catch an error here.
+
+However, the desugarer is the wrong place for certain checks. In particular,
+the desugarer can't report a sensible error message if an HsWrapper is malformed.
+After all, GHC itself produced the HsWrapper. So we store some message text
+in the appropriate HsWrappers (e.g. WpFun) that we can print out in the
+desugarer.
+
+There are a few more checks in places where Core is generated outside the
+desugarer. For example, in datatype and class declarations, where levity
+polymorphism is checked for during validity checking. It would be nice to
+have one central place for all this, but that doesn't seem possible while
+still reporting nice error messages.
+
 -}
 
 -- Make a new Id with the same print name, but different type, and new unique
 newUniqueId :: Id -> Type -> DsM Id
-newUniqueId id = mkSysLocalOrCoVarM (occNameFS (nameOccName (idName id)))
+newUniqueId id = mk_local (occNameFS (nameOccName (idName id)))
 
 duplicateLocalDs :: Id -> DsM Id
 duplicateLocalDs old_local
@@ -327,12 +384,26 @@ newPredVarDs :: PredType -> DsM Var
 newPredVarDs pred
  = newSysLocalDs pred
 
-newSysLocalDs, newFailLocalDs :: Type -> DsM Id
-newSysLocalDs  = mkSysLocalOrCoVarM (fsLit "ds")
-newFailLocalDs = mkSysLocalOrCoVarM (fsLit "fail")
+newSysLocalDsNoLP, newSysLocalDs, newFailLocalDs :: Type -> DsM Id
+newSysLocalDsNoLP  = mk_local (fsLit "ds")
 
-newSysLocalsDs :: [Type] -> DsM [Id]
-newSysLocalsDs tys = mapM newSysLocalDs tys
+-- this variant should be used when the caller can be sure that the variable type
+-- is not levity-polymorphic. It is necessary when the type is knot-tied because
+-- of the fixM used in DsArrows. See Note [Levity polymorphism checking]
+newSysLocalDs = mkSysLocalOrCoVarM (fsLit "ds")
+newFailLocalDs = mkSysLocalOrCoVarM (fsLit "fail")
+  -- the fail variable is used only in a situation where we can tell that
+  -- levity-polymorphism is impossible.
+
+newSysLocalsDsNoLP, newSysLocalsDs :: [Type] -> DsM [Id]
+newSysLocalsDsNoLP = mapM newSysLocalDsNoLP
+newSysLocalsDs = mapM newSysLocalDs
+
+mk_local :: FastString -> Type -> DsM Id
+mk_local fs ty = do { dsNoLevPoly ty (text "When trying to create a variable of type:" <+>
+                                      ppr ty)  -- could improve the msg with another
+                                               -- parameter indicating context
+                    ; mkSysLocalOrCoVarM fs ty }
 
 {-
 We can also reach out and either set/grab location information from
@@ -387,6 +458,7 @@ putSrcSpanDs (RealSrcSpan real_span) thing_inside
   = updLclEnv (\ env -> env {dsl_loc = real_span}) thing_inside
 
 -- | Emit a warning for the current source location
+-- NB: Warns whether or not -Wxyz is set
 warnDs :: WarnReason -> SDoc -> DsM ()
 warnDs reason warn
   = do { env <- getGblEnv
@@ -396,14 +468,49 @@ warnDs reason warn
                    mkWarnMsg dflags loc (ds_unqual env) warn
        ; updMutVar (ds_msgs env) (\ (w,e) -> (w `snocBag` msg, e)) }
 
-failWithDs :: SDoc -> DsM a
-failWithDs err
+-- | Emit a warning only if the correct WarnReason is set in the DynFlags
+warnIfSetDs :: WarningFlag -> SDoc -> DsM ()
+warnIfSetDs flag warn
+  = whenWOptM flag $
+    warnDs (Reason flag) warn
+
+errDs :: SDoc -> DsM ()
+errDs err
   = do  { env <- getGblEnv
         ; loc <- getSrcSpanDs
         ; dflags <- getDynFlags
         ; let msg = mkErrMsg dflags loc (ds_unqual env) err
-        ; updMutVar (ds_msgs env) (\ (w,e) -> (w, e `snocBag` msg))
+        ; updMutVar (ds_msgs env) (\ (w,e) -> (w, e `snocBag` msg)) }
+
+-- | Issue an error, but return the expression for (), so that we can continue
+-- reporting errors.
+errDsCoreExpr :: SDoc -> DsM CoreExpr
+errDsCoreExpr err
+  = do { errDs err
+       ; return $ mkCoreTup [] }
+
+failWithDs :: SDoc -> DsM a
+failWithDs err
+  = do  { errDs err
         ; failM }
+
+failDs :: DsM a
+failDs = failM
+
+-- (askNoErrsDs m) runs m
+-- If m fails, (askNoErrsDs m) fails
+-- If m succeeds with result r, (askNoErrsDs m) succeeds with result (r, b),
+--  where b is True iff m generated no errors
+-- Regardless of success or failure, any errors generated by m are propagated
+-- c.f. TcRnMonad.askNoErrs
+askNoErrsDs :: DsM a -> DsM (a, Bool)
+askNoErrsDs m
+ = do { errs_var <- newMutVar emptyMessages
+      ; env <- getGblEnv
+      ; res <- setGblEnv (env { ds_msgs = errs_var }) m
+      ; (warns, errs) <- readMutVar errs_var
+      ; updMutVar (ds_msgs env) (\ (w,e) -> (w `unionBags` warns, e `unionBags` errs))
+      ; return (res, isEmptyBag errs) }
 
 mkPrintUnqualifiedDs :: DsM PrintUnqualified
 mkPrintUnqualifiedDs = ds_unqual <$> getGblEnv
@@ -509,6 +616,12 @@ dsGetFamInstEnvs
 dsGetMetaEnv :: DsM (NameEnv DsMetaVal)
 dsGetMetaEnv = do { env <- getLclEnv; return (dsl_meta env) }
 
+-- | The @COMPLETE@ pragams provided by the user for a given `TyCon`.
+dsGetCompleteMatches :: TyCon -> DsM [CompleteMatch]
+dsGetCompleteMatches tc = do
+  env <- getGblEnv
+  return $ (lookupWithDefaultUFM (ds_complete_matches env) [] tc)
+
 dsLookupMetaEnv :: Name -> DsM (Maybe DsMetaVal)
 dsLookupMetaEnv name = do { env <- getLclEnv; return (lookupNameEnv (dsl_meta env) name) }
 
@@ -529,3 +642,16 @@ discardWarningsDs thing_inside
         ; writeTcRef (ds_msgs env) old_msgs
 
         ; return result }
+
+-- | Fail with an error message if the type is levity polymorphic.
+dsNoLevPoly :: Type -> SDoc -> DsM ()
+-- See Note [Levity polymorphism checking]
+dsNoLevPoly ty doc = checkForLevPolyX errDs doc ty
+
+-- | Check an expression for levity polymorphism, failing if it is
+-- levity polymorphic.
+dsNoLevPolyExpr :: CoreExpr -> SDoc -> DsM ()
+-- See Note [Levity polymorphism checking]
+dsNoLevPolyExpr e doc
+  | isExprLevPoly e = errDs (formatLevPolyErr (exprType e) $$ doc)
+  | otherwise       = return ()

@@ -235,13 +235,13 @@ requirementMerges dflags mod_name =
 -- requirements by imports of modules from other packages.  The situation
 -- is something like this:
 --
---      package p where
+--      unit p where
 --          signature A
 --          signature B
 --              import A
 --
---      package q where
---          include p
+--      unit q where
+--          dependency p[A=<A>,B=<B>]
 --          signature A
 --          signature B
 --
@@ -368,18 +368,42 @@ thinModIface avails iface =
         -- perhaps there might be two IfaceTopBndr that are the same
         -- OccName but different Name.  Requires better understanding
         -- of invariants here.
-        mi_decls = filter (decl_pred . snd) (mi_decls iface)
+        mi_decls = exported_decls ++ non_exported_decls ++ dfun_decls
         -- mi_insts = ...,
         -- mi_fam_insts = ...,
     }
   where
-    occs = mkOccSet [ occName n
-                    | a <- avails
-                    , n <- availNames a ]
-    -- NB: Never drop DFuns
-    decl_pred IfaceId{ ifIdDetails = IfDFunId } = True
-    decl_pred decl =
-        nameOccName (ifName decl) `elemOccSet` occs
+    decl_pred occs decl = nameOccName (ifName decl) `elemOccSet` occs
+    filter_decls occs = filter (decl_pred occs . snd) (mi_decls iface)
+
+    exported_occs = mkOccSet [ occName n
+                             | a <- avails
+                             , n <- availNames a ]
+    exported_decls = filter_decls exported_occs
+
+    non_exported_occs = mkOccSet [ occName n
+                                 | (_, d) <- exported_decls
+                                 , n <- ifaceDeclNeverExportedRefs d ]
+    non_exported_decls = filter_decls non_exported_occs
+
+    dfun_pred IfaceId{ ifIdDetails = IfDFunId } = True
+    dfun_pred _ = False
+    dfun_decls = filter (dfun_pred . snd) (mi_decls iface)
+
+-- | The list of 'Name's of *non-exported* 'IfaceDecl's which this
+-- 'IfaceDecl' may refer to.  A non-exported 'IfaceDecl' should be kept
+-- after thinning if an *exported* 'IfaceDecl' (or 'mi_insts', perhaps)
+-- refers to it; we can't decide to keep it by looking at the exports
+-- of a module after thinning.  Keep this synchronized with
+-- 'rnIfaceDecl'.
+ifaceDeclNeverExportedRefs :: IfaceDecl -> [Name]
+ifaceDeclNeverExportedRefs d@IfaceFamily{} =
+    case ifFamFlav d of
+        IfaceClosedSynFamilyTyCon (Just (n, _))
+            -> [n]
+        _   -> []
+ifaceDeclNeverExportedRefs _ = []
+
 
 -- Note [Blank hsigs for all requirements]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -399,6 +423,53 @@ inheritedSigPvpWarning =
           "compatible with PVP-style version bounds.  Instead, copy the " ++
           "declaration to the local hsig file or move the signature to a " ++
           "library of its own and add that library as a dependency."
+
+-- Note [Handling never-exported TyThings under Backpack]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--   DEFINITION: A "never-exported TyThing" is a TyThing whose 'Name' will
+--   never be mentioned in the export list of a module (mi_avails).
+--   Unlike implicit TyThings (Note [Implicit TyThings]), non-exported
+--   TyThings DO have a standalone IfaceDecl declaration in their
+--   interface file.
+--
+-- Originally, Backpack was designed under the assumption that anything
+-- you could declare in a module could also be exported; thus, merging
+-- the export lists of two signatures is just merging the declarations
+-- of two signatures writ small.  Of course, in GHC Haskell, there are a
+-- few important things which are not explicitly exported but still can
+-- be used:  in particular, dictionary functions for instances and
+-- coercion axioms for type families also count.
+--
+-- When handling these non-exported things, there two primary things
+-- we need to watch out for:
+--
+--  * Signature matching/merging is done by comparing each
+--    of the exported entities of a signature and a module.  These exported
+--    entities may refer to non-exported TyThings which must be tested for
+--    consistency.  For example, an instance (ClsInst) will refer to a
+--    non-exported DFunId.  In this case, 'checkBootDeclM' directly compares the
+--    embedded 'DFunId' in 'is_dfun'.
+--
+--    For this to work at all, we must ensure that pointers in 'is_dfun' refer
+--    to DISTINCT 'DFunId's, even though the 'Name's (may) be the same.
+--    Unfortunately, this is the OPPOSITE of how we treat most other references
+--    to 'Name's, so this case needs to be handled specially.
+--
+--    The details are in the documentation for 'typecheckIfacesForMerging'.
+--    and the Note [Resolving never-exported Names in TcIface].
+--
+--  * When we rename modules and signatures, we use the export lists to
+--    decide how the declarations should be renamed.  However, this
+--    means we don't get any guidance for how to rename non-exported
+--    entities.  Fortunately, we only need to rename these entities
+--    *consistently*, so that 'typecheckIfacesForMerging' can wire them
+--    up as needed.
+--
+--    The details are in Note [rnIfaceNeverExported] in 'RnModIface'.
+--
+-- The root cause for all of these complications is the fact that these
+-- logically "implicit" entities are defined indirectly in an interface
+-- file.  #13151 gives a proposal to make these *truly* implicit.
 
 -- | Given a local 'ModIface', merge all inherited requirements
 -- from 'requirementMerges' into this signature, producing
@@ -642,7 +713,7 @@ mergeSignatures hsmod lcl_iface0 = do
     -- when we have a ClsInst, we can pull up the correct DFun to check if
     -- the types match.
     --
-    -- See also Note [Bogus DFun renamings] in RnModIface
+    -- See also Note [rnIfaceNeverExported] in RnModIface
     dfun_insts <- forM (tcg_insts tcg_env) $ \inst -> do
         n <- newDFunName (is_cls inst) (is_tys inst) (nameSrcSpan (is_dfun_name inst))
         let dfun = setVarName (is_dfun inst) n

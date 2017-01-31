@@ -198,7 +198,7 @@ import Control.Monad (liftM, ap)
 -- Setting variable info: top-level, binds, RHSs
 -- --------------------------------------------------------------
 
-coreToStg :: DynFlags -> Module -> CoreProgram -> [StgBinding]
+coreToStg :: DynFlags -> Module -> CoreProgram -> [StgTopBinding]
 coreToStg dflags this_mod pgm
   = pgm'
   where (_, _, pgm') = coreTopBindsToStg dflags this_mod emptyVarEnv pgm
@@ -213,7 +213,7 @@ coreTopBindsToStg
     -> Module
     -> IdEnv HowBound           -- environment for the bindings
     -> CoreProgram
-    -> (IdEnv HowBound, FreeVarsInfo, [StgBinding])
+    -> (IdEnv HowBound, FreeVarsInfo, [StgTopBinding])
 
 coreTopBindsToStg _      _        env [] = (env, emptyFVInfo, [])
 coreTopBindsToStg dflags this_mod env (b:bs)
@@ -231,7 +231,14 @@ coreTopBindToStg
         -> IdEnv HowBound
         -> FreeVarsInfo         -- Info about the body
         -> CoreBind
-        -> (IdEnv HowBound, FreeVarsInfo, StgBinding)
+        -> (IdEnv HowBound, FreeVarsInfo, StgTopBinding)
+
+coreTopBindToStg _ _ env body_fvs (NonRec id (Lit (MachStr str)))
+  -- top-level string literal
+  = let
+        env' = extendVarEnv env id how_bound
+        how_bound = LetBound TopLet 0
+    in (env', body_fvs, StgTopStringLit id str)
 
 coreTopBindToStg dflags this_mod env body_fvs (NonRec id rhs)
   = let
@@ -243,7 +250,7 @@ coreTopBindToStg dflags this_mod env body_fvs (NonRec id rhs)
               (stg_rhs, fvs') <- coreToTopStgRhs dflags this_mod body_fvs (id,rhs)
               return (stg_rhs, fvs')
 
-        bind = StgNonRec id stg_rhs
+        bind = StgTopLifted $ StgNonRec id stg_rhs
     in
     ASSERT2(consistentCafInfo id bind, ppr id )
       -- NB: previously the assertion printed 'rhs' and 'bind'
@@ -267,7 +274,7 @@ coreTopBindToStg dflags this_mod env body_fvs (Rec pairs)
                let fvs' = unionFVInfos fvss'
                return (stg_rhss, fvs')
 
-        bind = StgRec (zip binders stg_rhss)
+        bind = StgTopLifted $ StgRec (zip binders stg_rhss)
     in
     ASSERT2(consistentCafInfo (head binders) bind, ppr binders)
     (env', fvs' `unionFVInfo` body_fvs, bind)
@@ -277,7 +284,7 @@ coreTopBindToStg dflags this_mod env body_fvs (Rec pairs)
 -- what CoreToStg has figured out about the binding's SRT.  The
 -- CafInfo will be exact in all cases except when CorePrep has
 -- floated out a binding, in which case it will be approximate.
-consistentCafInfo :: Id -> GenStgBinding Var Id -> Bool
+consistentCafInfo :: Id -> GenStgTopBinding Var Id -> Bool
 consistentCafInfo id bind
   = WARN( not (exact || is_sat_thing) , ppr id <+> ppr id_marked_caffy <+> ppr binding_is_caffy )
     safe
@@ -449,16 +456,25 @@ coreToStgExpr (Let bind body) = do
 coreToStgExpr e = pprPanic "coreToStgExpr" (ppr e)
 
 mkStgAltType :: Id -> [CoreAlt] -> AltType
-mkStgAltType bndr alts = case repType (idType bndr) of
-    UnaryRep rep_ty -> case tyConAppTyCon_maybe rep_ty of
-        Just tc | isUnliftedTyCon tc -> PrimAlt tc
-                | isAbstractTyCon tc -> look_for_better_tycon
-                | isAlgTyCon tc      -> AlgAlt tc
-                | otherwise          -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
-                                        PolyAlt
-        Nothing                      -> PolyAlt
-    MultiRep slots -> MultiValAlt (length slots)
+mkStgAltType bndr alts
+  | isUnboxedTupleType bndr_ty || isUnboxedSumType bndr_ty
+  = MultiValAlt (length prim_reps)  -- always use MultiValAlt for unboxed tuples
+
+  | otherwise
+  = case prim_reps of
+      [LiftedRep] -> case tyConAppTyCon_maybe (unwrapType bndr_ty) of
+        Just tc
+          | isAbstractTyCon tc -> look_for_better_tycon
+          | isAlgTyCon tc      -> AlgAlt tc
+          | otherwise          -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
+                                  PolyAlt
+        Nothing                -> PolyAlt
+      [unlifted] -> PrimAlt unlifted
+      not_unary  -> MultiValAlt (length not_unary)
   where
+   bndr_ty   = idType bndr
+   prim_reps = typePrimRep bndr_ty
+
    _is_poly_alt_tycon tc
         =  isFunTyCon tc
         || isPrimTyCon tc   -- "Any" is lifted but primitive
@@ -604,8 +620,7 @@ coreToStgArgs (arg : args) = do         -- Non-type argument
         arg_ty = exprType arg
         stg_arg_ty = stgArgType stg_arg
         bad_args = (isUnliftedType arg_ty && not (isUnliftedType stg_arg_ty))
-                || (map typePrimRep (repTypeArgs arg_ty)
-                        /= map typePrimRep (repTypeArgs stg_arg_ty))
+                || (typePrimRep arg_ty /= typePrimRep stg_arg_ty)
         -- In GHCi we coerce an argument of type BCO# (unlifted) to HValue (lifted),
         -- and pass it to a function expecting an HValue (arg_ty).  This is ok because
         -- we can treat an unlifted value as lifted.  But the other way round
@@ -724,7 +739,8 @@ mkStgRhs' con_updateable rhs_fvs bndr binder_info rhs
   | StgConApp con args _ <- unticked_rhs
   , not (con_updateable con args)
   = -- CorePrep does this right, but just to make sure
-    ASSERT(not (isUnboxedTupleCon con || isUnboxedSumCon con))
+    ASSERT2( not (isUnboxedTupleCon con || isUnboxedSumCon con)
+           , ppr bndr $$ ppr con $$ ppr args)
     StgRhsCon noCCS con args
   | otherwise
   = StgRhsClosure noCCS binder_info
@@ -757,7 +773,7 @@ mkStgRhs' con_updateable rhs_fvs bndr binder_info rhs
 --           and lots of PAP_enters.
 --
 --         - in the case where the thunk is top-level, we save building
---           a black hole and futhermore the thunk isn't considered to
+--           a black hole and furthermore the thunk isn't considered to
 --           be a CAF any more, so it doesn't appear in any SRTs.
 --
 -- We do it here, because the arity information is accurate, and we need

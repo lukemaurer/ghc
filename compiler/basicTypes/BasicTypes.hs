@@ -422,7 +422,7 @@ Consider
 \begin{verbatim}
         a `op1` b `op2` c
 \end{verbatim}
-@(compareFixity op1 op2)@ tells which way to arrange appication, or
+@(compareFixity op1 op2)@ tells which way to arrange application, or
 whether there's an error.
 -}
 
@@ -761,7 +761,7 @@ pprAlternative :: (a -> SDoc) -- ^ The pretty printing function to use
                -> SDoc        -- ^ 'SDoc' where the alternative havs been pretty
                               -- printed and finally packed into a paragraph.
 pprAlternative pp x alt arity =
-    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt - 1) vbar)
+    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt) vbar)
 
 {-
 ************************************************************************
@@ -988,7 +988,7 @@ ManyOccs and j2 will get `OneOcc { occ_one_br = True }`.
 
 ************************************************************************
 *                                                                      *
-                Default method specfication
+                Default method specification
 *                                                                      *
 ************************************************************************
 

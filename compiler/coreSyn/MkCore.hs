@@ -14,7 +14,7 @@ module MkCore (
         mkIntExpr, mkIntExprInt,
         mkIntegerExpr,
         mkFloatExpr, mkDoubleExpr,
-        mkCharExpr, mkStringExpr, mkStringExprFS,
+        mkCharExpr, mkStringExpr, mkStringExprFS, mkStringExprFSWith,
 
         -- * Floats
         FloatBind(..), wrapFloat,
@@ -173,7 +173,7 @@ mk_val_app fun arg arg_ty res_ty
         -- game, mk_val_app returns an expression that does not have
         -- have a free wild-id.  So the only thing that can go wrong
         -- is if you take apart this case expression, and pass a
-        -- fragmet of it as the fun part of a 'mk_val_app'.
+        -- fragment of it as the fun part of a 'mk_val_app'.
 
 -----------
 mkWildEvBinder :: PredType -> EvVar
@@ -271,16 +271,19 @@ mkStringExprFS :: MonadThings m => FastString -> m CoreExpr  -- Result :: String
 
 mkStringExpr str = mkStringExprFS (mkFastString str)
 
-mkStringExprFS str
+mkStringExprFS = mkStringExprFSWith lookupId
+
+mkStringExprFSWith :: Monad m => (Name -> m Id) -> FastString -> m CoreExpr
+mkStringExprFSWith lookupM str
   | nullFS str
   = return (mkNilExpr charTy)
 
   | all safeChar chars
-  = do unpack_id <- lookupId unpackCStringName
+  = do unpack_id <- lookupM unpackCStringName
        return (App (Var unpack_id) lit)
 
   | otherwise
-  = do unpack_utf8_id <- lookupId unpackCStringUtf8Name
+  = do unpack_utf8_id <- lookupM unpackCStringUtf8Name
        return (App (Var unpack_utf8_id) lit)
 
   where
@@ -310,7 +313,7 @@ Note [Flattening one-tuples]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 This family of functions creates a tuple of variables/expressions/types.
   mkCoreTup [e1,e2,e3] = (e1,e2,e3)
-What if there is just one variable/expression/type in the agument?
+What if there is just one variable/expression/type in the argument?
 We could do one of two things:
 
 * Flatten it out, so that
@@ -755,4 +758,3 @@ Notice the runtime-representation polymorphism. This ensures that
 "error" can be instantiated at unboxed as well as boxed types.
 This is OK because it never returns, so the return type is irrelevant.
 -}
-

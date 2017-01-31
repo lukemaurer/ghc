@@ -120,7 +120,7 @@ AC_ARG_VAR(CC_STAGE0, [C compiler command (bootstrap)])
 if test "$WithGhc" != ""; then
   FPTOOLS_GHC_VERSION([GhcVersion], [GhcMajVersion], [GhcMinVersion], [GhcPatchLevel])dnl
 
-  if test "$GhcMajVersion" = "unknown" -o "$GhcMinVersion" = "unknown"; then
+  if test "$GhcMajVersion" = "unknown" || test "$GhcMinVersion" = "unknown"; then
      AC_MSG_ERROR([Cannot determine the version of $WithGhc.  Is it really GHC?])
   fi
 
@@ -399,24 +399,6 @@ FP_CURSES
 
 XCODE_VERSION()
 
-SplitObjsBroken=NO
-if test "$TargetOS_CPP" = "darwin"
-then
-    # Split objects is broken (#4013) with XCode < 3.2
-    if test "$XCodeVersion1" -lt 3
-    then
-        SplitObjsBroken=YES
-    else
-        if test "$XCodeVersion1" -eq 3
-        then
-            if test "$XCodeVersion2" -lt 2
-            then
-                SplitObjsBroken=YES
-            fi
-        fi
-    fi
-fi
-AC_SUBST([SplitObjsBroken])
 
 dnl ** Building a cross compiler?
 dnl --------------------------------------------------------------
@@ -600,23 +582,25 @@ AC_SUBST([GhcLibsWithUnix])
 dnl ** does #! work?
 AC_SYS_INTERPRETER()
 
+# Check for split-objs
+SplitObjsBroken=NO
 dnl ** look for `perl'
 case $HostOS_CPP in
 cygwin32|mingw32)
-    PerlCmd=$hardtop/inplace/perl/perl
-    ;;
+  PerlCmd=$hardtop/inplace/perl/perl
+  ;;
 *)
-    AC_PATH_PROG(PerlCmd,perl)
+    AC_PATH_PROG([PerlCmd],[perl])
     if test -z "$PerlCmd"
     then
-        echo "You must install perl before you can continue"
-        echo "Perhaps it is already installed, but not in your PATH?"
-        exit 1
+        AC_MSG_WARN([No Perl on PATH, disabling split object support])
+        SplitObjsBroken=YES
     else
         FPTOOLS_CHECK_PERL_VERSION
     fi
     ;;
 esac
+AC_SUBST([SplitObjsBroken])
 
 dnl ** look for GCC and find out which version
 dnl     Figure out which C compiler to use.  Gcc is preferred.
@@ -1122,6 +1106,7 @@ AC_SUBST(BUILD_SPHINX_PDF)
 LIBRARY_VERSION(base)
 LIBRARY_VERSION(Cabal, Cabal/Cabal)
 LIBRARY_VERSION(ghc-prim)
+LIBRARY_VERSION(compact)
 LIBRARY_ghc_VERSION="$ProjectVersion"
 AC_SUBST(LIBRARY_ghc_VERSION)
 
@@ -1159,7 +1144,7 @@ checkMake380 gmake
 
 AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt utils/mkUserGuidePart/mkUserGuidePart.cabal distrib/configure.ac])
 AC_OUTPUT
-
+[
 if test "$print_make_warning" = "true"; then
    echo
    echo "WARNING: It looks like \"$MakeCmd\" is GNU make 3.80."
@@ -1167,7 +1152,7 @@ if test "$print_make_warning" = "true"; then
    echo "Please use GNU make >= 3.81."
 fi
 
-echo ["
+echo "
 ----------------------------------------------------------------------
 Configure completed successfully.
 
@@ -1177,12 +1162,12 @@ Configure completed successfully.
    Build platform        : $BuildPlatform
    Host platform         : $HostPlatform
    Target platform       : $TargetPlatform
-"]
+"
 
-echo ["\
+echo "\
    Bootstrapping using   : $WithGhc
       which is version   : $GhcVersion
-"]
+"
 
 if test "x$CC_LLVM_BACKEND" = "x1"; then
     if test "x$CC_CLANG_BACKEND" = "x1"; then
@@ -1194,7 +1179,7 @@ else
     CompilerName="gcc          "
 fi
 
-echo ["\
+echo "\
    Using (for bootstrapping) : $CC_STAGE0
    Using $CompilerName       : $CC
       which is version       : $GccVersion
@@ -1213,24 +1198,24 @@ echo ["\
 
    Using LLVM tools
       llc   : $LlcCmd
-      opt   : $OptCmd"]
+      opt   : $OptCmd"
 
 if test "$HSCOLOUR" = ""; then
-echo ["
+echo "
    HsColour was not found; documentation will not contain source links
-"]
+"
 else
-echo ["\
+echo "\
    HsColour : $HSCOLOUR
-"]
+"
 fi
 
-echo ["\
+echo "\
    Tools to build Sphinx HTML documentation available: $BUILD_SPHINX_HTML
-   Tools to build Sphinx PDF documentation available: $BUILD_SPHINX_PDF"]
+   Tools to build Sphinx PDF documentation available: $BUILD_SPHINX_PDF"
 
-echo ["----------------------------------------------------------------------
-"]
+echo "----------------------------------------------------------------------
+"
 
 echo "\
 For a standard build of GHC (fully optimised with profiling), type (g)make.
@@ -1240,4 +1225,4 @@ mk/build.mk.sample to mk/build.mk, and edit the settings in there.
 
 For more information on how to configure your GHC build, see
    http://ghc.haskell.org/trac/ghc/wiki/Building
-"
+"]

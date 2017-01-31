@@ -89,15 +89,16 @@ module Id (
 
         -- ** Reading 'IdInfo' fields
         idArity,
-        idCallArity,
+        idCallArity, idFunRepArity,
         idUnfolding, realIdUnfolding,
         idSpecialisation, idCoreRules, idHasRules,
         idCafInfo,
         idOneShotInfo, idStateHackOneShotInfo,
         idOccInfo,
+        isNeverLevPolyId,
 
         -- ** Writing 'IdInfo' fields
-        setIdUnfolding,
+        setIdUnfolding, setCaseBndrEvald,
         setIdArity,
         setIdCallArity,
 
@@ -115,7 +116,7 @@ module Id (
 
 #include "HsVersions.h"
 
-import CoreSyn ( CoreRule, Unfolding( NoUnfolding ) )
+import CoreSyn ( CoreRule, evaldUnfolding, Unfolding( NoUnfolding ) )
 
 import IdInfo
 import BasicTypes
@@ -130,6 +131,7 @@ import Var( Id, CoVar, DictId, JoinId,
 import qualified Var
 
 import Type
+import RepType
 import TysPrim
 import DataCon
 import Demand
@@ -605,6 +607,9 @@ idCallArity id = callArityInfo (idInfo id)
 setIdCallArity :: Id -> Arity -> Id
 setIdCallArity id arity = modifyIdInfo (`setCallArityInfo` arity) id
 
+idFunRepArity :: Id -> RepArity
+idFunRepArity x = countFunRepArgs (idArity x) (idType x)
+
 -- | Returns true if an application to n args would diverge
 isBottomingId :: Id -> Bool
 isBottomingId id = isBottomingSig (idStrictness id)
@@ -655,6 +660,15 @@ idDemandInfo       id = demandInfo (idInfo id)
 
 setIdDemandInfo :: Id -> Demand -> Id
 setIdDemandInfo id dmd = modifyIdInfo (`setDemandInfo` dmd) id
+
+setCaseBndrEvald :: StrictnessMark -> Id -> Id
+-- Used for variables bound by a case expressions, both the case-binder
+-- itself, and any pattern-bound variables that are argument of a
+-- strict constructor.  It just marks the variable as already-evaluated,
+-- so that (for example) a subsequent 'seq' can be dropped
+setCaseBndrEvald str id
+  | isMarkedStrict str = id `setIdUnfolding` evaldUnfolding
+  | otherwise          = id
 
         ---------------------------------
         -- SPECIALISATION
@@ -911,3 +925,6 @@ transferPolyIdInfo old_id abstract_wrt new_id
                                  `setInlinePragInfo` old_inline_prag
                                  `setOccInfo` new_occ_info
                                  `setStrictnessInfo` new_strictness
+
+isNeverLevPolyId :: Id -> Bool
+isNeverLevPolyId = isNeverLevPolyIdInfo . idInfo

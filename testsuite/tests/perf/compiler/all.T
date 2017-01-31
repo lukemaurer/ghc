@@ -39,7 +39,7 @@ test('T1969',
              # 2013-11-13 17 (x86/Windows, 64bit machine)
              # 2015-07-11 21 (x86/Linux, 64bit machine) use +RTS -G1
              # 2016-04-06 30 (x86/Linux, 64bit machine)
-           (wordsize(64), 55, 20)]),
+           (wordsize(64), 68, 20)]),
              #            28 (amd64/Linux)
              #            34 (amd64/Linux)
              # 2012-09-20 23 (amd64/Linux)
@@ -51,6 +51,8 @@ test('T1969',
              # 2013-09-11 30, 15 (adapt to Phab CI)
              # 2015-06-03 41, (amd64/Linux) use +RTS -G1
              # 2015-10-28 55, (amd64/Linux) emit Typeable at definition site
+             # 2016-10-20 68, (amd64/Linux) allow top-level string literals
+             #                See the comment 16 on #8472.
       compiler_stats_num_field('max_bytes_used',
           [(platform('i386-unknown-mingw32'), 5719436, 20),
                                  # 2010-05-17 5717704 (x86/Windows)
@@ -427,7 +429,7 @@ test('T5631',
         # 2015-12-21:     1198327544 (Mac) TypeApplications (will fix with #11196)
         # 2015-03-18:     1124068664 (Mac) optimize Unify & zonking
         # 2016-10-19:     1024926024 (amd64/Linux) Refactor traceRn interface (#12617)
-        # 2016-11-10:     1077429456 (amd64/Linux) Stop -dno-debug-output supressing -ddump-tc-trace
+        # 2016-11-10:     1077429456 (amd64/Linux) Stop -dno-debug-output suppressing -ddump-tc-trace
 
        only_ways(['normal'])
       ],
@@ -502,7 +504,7 @@ test('T5321Fun',
              # 2014-09-03: 299656164     (specialisation and inlining)
              # 10/12/2014: 206406188     #  Improvements in constraint solver
              # 2016-04-06: 279922360 x86/Linux
-            (wordsize(64), 497356688, 5)])
+            (wordsize(64), 525895608, 5)])
              # prev:       585521080
              # 29/08/2012: 713385808     #  (increase due to new codegen)
              # 15/05/2013: 628341952     #  (reason for decrease unknown)
@@ -519,6 +521,12 @@ test('T5321Fun',
              # 06/01/2017: 497356688     #  Small coercion optimisations
                                          #  The actual decrease was only 2%; earlier
                                          #    commits had drifted down
+             # 22/01/2017: 525895608     #  Allow top-level string literals in Core. I'm not
+                                         #    convinced that this patch is
+                                         #    responsible for all of this
+                                         #    change, however. Namely I am
+                                         #    quite skeptical of the downward
+                                         #    "drift" reported above
       ],
       compile,[''])
 
@@ -598,7 +606,7 @@ test('T5837',
              # 2014-12-08: 115905208  Constraint solver perf improvements (esp kick-out)
              # 2016-04-06: 24199320  (x86/Linux, 64-bit machine) TypeInType
 
-           (wordsize(64), 52597024, 10)])
+           (wordsize(64), 57861352, 10)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -622,6 +630,8 @@ test('T5837',
              # 2016-10-25 52597024  amd64/Linux, the test now passes (hooray), and so
              #                          allocates more because it goes right down the
              #                          compilation pipeline
+             # 2017-01-24 57861352  amd64/Linux, very likely due to the top-level strings
+             #                          in Core patch.
       ],
       compile, ['-freduction-depth=50'])
 
@@ -814,10 +824,13 @@ test('T9961',
 test('T9233',
     [ only_ways(['normal']),
       compiler_stats_num_field('bytes allocated',
-        [(wordsize(64), 984268712, 5),
+        [(wordsize(64), 861862608, 5),
+
          # 2015-08-04    999826288     initial value
          # 2016-04-14   1066246248     Final demand analyzer run
          # 2016-06-18    984268712     shuffling around of Data.Functor.Identity
+         # 2017-0123     861862608     worker/wrapper evald-ness flags; 10% improvement!
+
          (wordsize(32),  515672240, 5)   # Put in your value here if you hit this
          # 2016-04-06    515672240     (x86/Linux) initial value
         ]),
@@ -829,7 +842,7 @@ test('T9233',
 test('T10370',
      [ only_ways(['optasm']),
        compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 33049168, 15),
+          [(wordsize(64), 38221184, 15),
           # 2015-10-22    19548720
           # 2016-02-24    22823976   Changing Levity to RuntimeRep; not sure why this regresses though, even after some analysis
           # 2016-04-14    28256896   final demand analyzer run
@@ -840,14 +853,17 @@ test('T10370',
           #     affected stats on bootstrapped GHC.  However,
           #     when I set -i0.01 with profiling, the heap profiles
           #     were identical, so I think it's just GC noise.
+          # 2016-10-20    38221184   Allow top-level string literals.
+          #                          See the comment 16 on #8472.
            (wordsize(32), 11371496, 15),
           # 2015-10-22    11371496
           ]),
        compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
-          [(wordsize(64), 121, 15),
+          [(wordsize(64), 146, 15),
           # 2015-10-22     76
           # 2016-04-14    101 final demand analyzer run
           # 2016-08-08    121 see above
+          # 2017-01-18    146 Allow top-level string literals in Core
            (wordsize(32),  39, 15),
           # 2015-10-22     39
           ]),
@@ -885,8 +901,9 @@ test('T12227',
 test('T12425',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 125831400, 5),
+          [(wordsize(64), 133380960, 5),
           # initial:    125831400
+          # 2017-01-18: 133380960  Allow top-level string literals in Core
           ]),
      ],
      compile,
@@ -896,9 +913,10 @@ test('T12234',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
           [(platform('x86_64-unknown-mingw32'), 77949232, 5),
-          # initial:    77949232
-           (wordsize(64), 72958288, 5),
-          # initial:    72958288
+          # initial:      77949232
+           (wordsize(64), 76848856, 5),
+          # initial:      72958288
+          # 2016-01-17:   76848856  (x86-64, Linux. drift?)
           ]),
      ],
      compile,
@@ -907,8 +925,9 @@ test('T12234',
 test('T13035',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 90595208, 5),
+          [(wordsize(64), 95269000, 5),
           # 2017-01-05   90595208 initial
+          # 2017-01-19   95269000 Allow top-level string literals in Core
           ]),
      ],
      compile,
@@ -926,8 +945,9 @@ test('T13056',
 
 test('T12707',
      [ compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 1271577192, 5),
+          [(wordsize(64), 1348865648, 5),
           # initial:    1271577192
+          # 2017-01-22: 1348865648  Allow top-level strings in Core
           ]),
      ],
      compile,

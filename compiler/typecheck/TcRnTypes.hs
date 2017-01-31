@@ -43,11 +43,11 @@ module TcRnTypes(
         IdBindingInfo(..),
         IsGroupClosed(..),
         SelfBootInfo(..),
-        pprTcTyThingCategory, pprPECategory,
+        pprTcTyThingCategory, pprPECategory, CompleteMatch(..),
 
         -- Desugaring types
         DsM, DsLclEnv(..), DsGblEnv(..), PArrBuiltin(..),
-        DsMetaEnv, DsMetaVal(..),
+        DsMetaEnv, DsMetaVal(..), CompleteMatchMap, mkCompleteMatchMap,
 
         -- Template Haskell
         ThStage(..), SpliceType(..), PendingStuff(..),
@@ -81,7 +81,7 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
-        addInsols, getInsolubles, addSimples, addImplics,
+        addInsols, getInsolubles, insolublesOnly, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
@@ -174,6 +174,7 @@ import FastString
 import qualified GHC.LanguageExtensions as LangExt
 import Fingerprint
 import Util
+import UniqFM ( emptyUFM, addToUFM_C, UniqFM )
 
 import Control.Monad (ap, liftM, msum)
 #if __GLASGOW_HASKELL__ > 710
@@ -181,11 +182,13 @@ import qualified Control.Monad.Fail as MonadFail
 #endif
 import Data.Set      ( Set )
 
-import Data.Map      ( Map )
+import Data.Map ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
 import GHCi.Message
 import GHCi.RemoteTypes
+
+import Data.List (foldl')
 
 import qualified Language.Haskell.TH as TH
 
@@ -324,7 +327,7 @@ data IfLclEnv
         -- This field is used to make sure "implicit" declarations
         -- (anything that cannot be exported in mi_exports) get
         -- wired up correctly in typecheckIfacesForMerging.  Most
-        -- of the time it's @Nothing@.  See Note [The implicit TypeEnv]
+        -- of the time it's @Nothing@.  See Note [Resolving never-exported Names in TcIface]
         -- in TcIface.
         if_implicits_env :: Maybe TypeEnv,
 
@@ -376,7 +379,17 @@ data DsGblEnv
                                                 -- exported entities of 'Data.Array.Parallel' iff
                                                 -- '-XParallelArrays' was given; otherwise, empty
         , ds_parr_bi :: PArrBuiltin             -- desugarar names for '-XParallelArrays'
+        , ds_complete_matches :: CompleteMatchMap
+           -- Additional complete pattern matches
         }
+
+type CompleteMatchMap = UniqFM [CompleteMatch]
+
+mkCompleteMatchMap :: [CompleteMatch] -> CompleteMatchMap
+mkCompleteMatchMap cms = foldl' insertMatch emptyUFM cms
+  where
+    insertMatch :: CompleteMatchMap -> CompleteMatch -> CompleteMatchMap
+    insertMatch ufm c@(CompleteMatch _ t) = addToUFM_C (++) ufm t [c]
 
 instance ContainsModule DsGblEnv where
     extractModule = ds_mod
@@ -651,9 +664,10 @@ data TcGblEnv
         tcg_top_loc :: RealSrcSpan,
         -- ^ The RealSrcSpan this module came from
 
-        tcg_static_wc :: TcRef WantedConstraints
-        -- ^ Wanted constraints of static forms.
+        tcg_static_wc :: TcRef WantedConstraints,
+          -- ^ Wanted constraints of static forms.
         -- See Note [Constraints in static forms].
+        tcg_complete_matches :: [CompleteMatch]
     }
 
 -- NB: topModIdentity, not topModSemantic!
@@ -2107,6 +2121,10 @@ addInsols wc cts
 getInsolubles :: WantedConstraints -> Cts
 getInsolubles = wc_insol
 
+insolublesOnly :: WantedConstraints -> WantedConstraints
+-- Keep only the insolubles
+insolublesOnly wc = wc { wc_simple = emptyBag, wc_impl = emptyBag }
+
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]
 dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
@@ -2561,8 +2579,8 @@ Consider f1 = (Given, ReprEq)
           f = (Derived, ReprEq)
 
 I thought maybe we could never get Derived ReprEq constraints, but
-we can; straight from the Wanteds during improvment. And from a Derived
-ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
+we can; straight from the Wanteds during improvement. And from a Derived
+ReprEq we could conceivably get a Derived NomEq improvement (by decomposing
 a type constructor with Nomninal role), and hence unify.
 -}
 
@@ -2919,7 +2937,7 @@ pprPatSkolInfo (RealDataCon dc)
   = sep [ text "a pattern with constructor:"
         , nest 2 $ ppr dc <+> dcolon
           <+> pprType (dataConUserType dc) <> comma ]
-          -- pprType prints forall's regardless of -fprint-explict-foralls
+          -- pprType prints forall's regardless of -fprint-explicit-foralls
           -- which is what we want here, since we might be saying
           -- type variable 't' is bound by ...
 
@@ -3079,6 +3097,7 @@ ctoHerald = text "arising from"
 exprCtOrigin :: HsExpr Name -> CtOrigin
 exprCtOrigin (HsVar (L _ name)) = OccurrenceOf name
 exprCtOrigin (HsUnboundVar uv)  = UnboundOccurrenceOf (unboundVarOcc uv)
+exprCtOrigin (HsConLikeOut {})  = panic "exprCtOrigin HsConLikeOut"
 exprCtOrigin (HsRecFld f)       = OccurrenceOfRecSel (rdrNameAmbiguousFieldOcc f)
 exprCtOrigin (HsOverLabel l)    = OverLabelOrigin l
 exprCtOrigin (HsIPVar ip)       = IPOccOrigin ip

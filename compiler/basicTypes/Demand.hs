@@ -1355,7 +1355,7 @@ type DmdShell   -- Describes the "outer shell"
    = JointDmd (Str ()) (Use ())
 
 toCleanDmd :: Demand -> Type -> (DmdShell, CleanDemand)
--- Splicts a Demand into its "shell" and the inner "clean demand"
+-- Splits a Demand into its "shell" and the inner "clean demand"
 toCleanDmd (JD { sd = s, ud = u }) expr_ty
   = (JD { sd = ss, ud = us }, JD { sd = s', ud = u' })
     -- See Note [Analyzing with lazy demand and lambdas]
@@ -1543,7 +1543,7 @@ Tricky point: make sure that we analyse in the 'virgin' pass. Consider
 In the virgin pass for 'f' we'll give 'f' a very strict (bottom) type.
 That might mean that we analyse the sub-expression containing the
 E = "...rec g..." stuff in a bottom demand.  Suppose we *didn't analyse*
-E, but just retuned botType.
+E, but just returned botType.
 
 Then in the *next* (non-virgin) iteration for 'f', we might analyse E
 in a weaker demand, and that will trigger doing a fixpoint iteration
@@ -1768,7 +1768,7 @@ something like: U(AAASAAAAA).  Then replace the 'S' by the demand 'd'.
 
 For single-method classes, which are represented by newtypes the signature
 of 'op' won't look like U(...), so the splitProdDmd_maybe will fail.
-That's fine: if we are doing strictness analysis we are also doing inling,
+That's fine: if we are doing strictness analysis we are also doing inlining,
 so we'll have inlined 'op' into a cast.  So we can bale out in a conservative
 way, returning nopDmdType.
 

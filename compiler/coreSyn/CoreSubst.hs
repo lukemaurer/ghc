@@ -506,7 +506,7 @@ substIdBndr _doc rec_subst subst@(Subst in_scope env tvs cvs) old_id
 
     old_ty = idType old_id
     no_type_change = (isEmptyVarEnv tvs && isEmptyVarEnv cvs) ||
-                     isEmptyVarSet (tyCoVarsOfType old_ty)
+                     noFreeVarsOfType old_ty
 
         -- new_id has the right IdInfo
         -- The lazy-set is because we're in a loop here, with
@@ -626,7 +626,7 @@ substCo subst co = Coercion.substCo (getTCvSubst subst) co
 
 substIdType :: Subst -> Id -> Id
 substIdType subst@(Subst _ _ tv_env cv_env) id
-  | (isEmptyVarEnv tv_env && isEmptyVarEnv cv_env) || isEmptyVarSet (tyCoVarsOfType old_ty) = id
+  | (isEmptyVarEnv tv_env && isEmptyVarEnv cv_env) || noFreeVarsOfType old_ty = id
   | otherwise   = setIdType id (substTy subst old_ty)
                 -- The tyCoVarsOfType is cheaper than it looks
                 -- because we cache the free tyvars of the type
@@ -644,8 +644,7 @@ substIdInfo subst new_id info
   where
     old_rules     = ruleInfo info
     old_unf       = unfoldingInfo info
-    nothing_to_do = isEmptyRuleInfo old_rules && isClosedUnfolding old_unf
-
+    nothing_to_do = isEmptyRuleInfo old_rules && not (isFragileUnfolding old_unf)
 
 ------------------
 -- | Substitutes for the 'Id's within an unfolding
@@ -1079,7 +1078,12 @@ maybe_substitute subst b r
   , isAlwaysActive (idInlineActivation b)       -- Note [Inline prag in simplOpt]
   , not (isStableUnfolding (idUnfolding b))
   , not (isExportedId b)
-  , not (isUnliftedType (idType b)) || exprOkForSpeculation r
+  , let id_ty = idType b
+     -- A levity-polymorphic id? Impossible you say?
+     -- See Note [Levity polymorphism invariants] in CoreSyn
+     -- Ah, but it *is* possible in the compulsory unfolding of unsafeCoerce#
+     -- This check prevents the isUnliftedType check from panicking.
+  , isTypeLevPoly id_ty || not (isUnliftedType (idType b)) || exprOkForSpeculation r
   = Just (extendIdSubst subst b r)
 
   | otherwise
@@ -1122,8 +1126,10 @@ subst_opt_id_bndr subst@(Subst in_scope id_subst tv_subst cv_subst) old_id
   where
     id1    = uniqAway in_scope old_id
     id2    = setIdType id1 (substTy subst (idType old_id))
-    new_id = zapFragileIdInfo id2       -- Zaps rules, worker-info, unfolding
-                                        -- and fragile OccInfo
+    new_id = zapFragileIdInfo id2
+             -- Zaps rules, worker-info, unfolding, and fragile OccInfo
+             -- The unfolding and rules will get added back later, by add_info
+
     new_in_scope = in_scope `extendInScopeSet` new_id
 
         -- Extend the substitution if the unique has changed,
@@ -1144,7 +1150,8 @@ add_info :: Subst -> InVar -> OutVar -> OutVar
 add_info subst old_bndr new_bndr
  | isTyVar old_bndr = new_bndr
  | otherwise        = maybeModifyIdInfo mb_new_info new_bndr
- where mb_new_info = substIdInfo subst new_bndr (idInfo old_bndr)
+ where
+   mb_new_info = substIdInfo subst new_bndr (idInfo old_bndr)
 
 simpleUnfoldingFun :: IdUnfoldingFun
 simpleUnfoldingFun id
@@ -1357,7 +1364,7 @@ than the ordinary arity of the dfun: see Note [DFun unfoldings] in CoreSyn
 exprIsLiteral_maybe :: InScopeEnv -> CoreExpr -> Maybe Literal
 -- Same deal as exprIsConApp_maybe, but much simpler
 -- Nevertheless we do need to look through unfoldings for
--- Integer literals, which are vigorously hoisted to top level
+-- Integer and string literals, which are vigorously hoisted to top level
 -- and not subsequently inlined
 exprIsLiteral_maybe env@(_, id_unf) e
   = case e of

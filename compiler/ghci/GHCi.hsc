@@ -599,7 +599,7 @@ ForeignRef
 ----------
 
 A ForeignRef is a RemoteRef with a finalizer that will free the
-'RemoteRef' when it is gargabe collected.  We mostly use ForeignHValue
+'RemoteRef' when it is garbage collected.  We mostly use ForeignHValue
 on the GHC side.
 
 The finalizer adds the RemoteRef to the iservPendingFrees list in the
@@ -641,13 +641,13 @@ wormhole dflags r = wormholeRef dflags (unsafeForeignRefToRemoteRef r)
 -- only works when the interpreter is running in the same process as
 -- the compiler, so it fails when @-fexternal-interpreter@ is on.
 wormholeRef :: DynFlags -> RemoteRef a -> IO a
-wormholeRef dflags r
+wormholeRef dflags _r
   | gopt Opt_ExternalInterpreter dflags
   = throwIO (InstallationError
       "this operation requires -fno-external-interpreter")
 #ifdef GHCI
   | otherwise
-  = localRef r
+  = localRef _r
 #else
   | otherwise
   = throwIO (InstallationError

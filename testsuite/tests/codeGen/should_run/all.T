@@ -70,8 +70,7 @@ test('cgrun063', normal, compile_and_run, [''])
 test('cgrun064', normal, compile_and_run, [''])
 test('cgrun065', normal, compile_and_run, [''])
 test('cgrun066', normal, compile_and_run, [''])
-test('cgrun067', extra_clean(['Cgrun067A.hi', 'Cgrun067A.o']),
-     compile_and_run, [''])
+test('cgrun067', [], compile_and_run, [''])
 test('cgrun068', reqlib('random'), compile_and_run, [''])
 test('cgrun069', omit_ways(['ghci']), multi_compile_and_run,
                  ['cgrun069', [('cgrun069_cmm.cmm', '')], ''])
@@ -146,6 +145,7 @@ test('PopCnt', omit_ways(['ghci']), multi_compile_and_run,
                  ['PopCnt', [('PopCnt_cmm.cmm', '')], ''])
 test('T12059', normal, compile_and_run, [''])
 test('T12433', normal, compile_and_run, [''])
+test('T12622', normal, multimod_compile_and_run, ['T12622', '-O'])
 test('T12757', normal, compile_and_run, [''])
 test('T12855', normal, compile_and_run, [''])
 test('T9577', [ unless(arch('x86_64') or arch('i386'),skip),

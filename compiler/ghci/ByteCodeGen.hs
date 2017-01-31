@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, MagicHash, RecordWildCards #-}
+{-# LANGUAGE CPP, MagicHash, RecordWildCards, BangPatterns #-}
 {-# OPTIONS_GHC -fprof-auto-top #-}
 --
 --  (c) The University of Glasgow 2002-2006
@@ -48,6 +48,7 @@ import SMRep
 import Bitmap
 import OrdList
 import Maybes
+import VarEnv
 
 import Data.List
 import Foreign
@@ -60,6 +61,7 @@ import Control.Arrow ( second )
 
 import Control.Exception
 import Data.Array
+import Data.ByteString (ByteString)
 import Data.Map (Map)
 import Data.IntMap (IntMap)
 import qualified Data.Map as Map
@@ -85,12 +87,18 @@ byteCodeGen hsc_env this_mod binds tycs mb_modBreaks
    = withTiming (pure dflags)
                 (text "ByteCodeGen"<+>brackets (ppr this_mod))
                 (const ()) $ do
-        let flatBinds = [ (bndr, simpleFreeVars rhs)
-                        | (bndr, rhs) <- flattenBinds binds]
+        -- Split top-level binds into strings and others.
+        -- See Note [generating code for top-level string literal bindings].
+        let (strings, flatBinds) = splitEithers $ do
+                (bndr, rhs) <- flattenBinds binds
+                return $ case rhs of
+                    Lit (MachStr str) -> Left (bndr, str)
+                    _ -> Right (bndr, simpleFreeVars rhs)
+        stringPtrs <- allocateTopStrings hsc_env strings
 
         us <- mkSplitUniqSupply 'y'
         (BcM_State{..}, proto_bcos) <-
-           runBc hsc_env us this_mod mb_modBreaks $
+           runBc hsc_env us this_mod mb_modBreaks (mkVarEnv stringPtrs) $
              mapM schemeTopBind flatBinds
 
         when (notNull ffis)
@@ -99,7 +107,7 @@ byteCodeGen hsc_env this_mod binds tycs mb_modBreaks
         dumpIfSet_dyn dflags Opt_D_dump_BCOs
            "Proto-BCOs" (vcat (intersperse (char ' ') (map ppr proto_bcos)))
 
-        cbc <- assembleBCOs hsc_env proto_bcos tycs
+        cbc <- assembleBCOs hsc_env proto_bcos tycs (map snd stringPtrs)
           (case modBreaks of
              Nothing -> Nothing
              Just mb -> Just mb{ modBreaks_breakInfo = breakInfo })
@@ -115,6 +123,29 @@ byteCodeGen hsc_env this_mod binds tycs mb_modBreaks
         return cbc
 
   where dflags = hsc_dflags hsc_env
+
+allocateTopStrings
+  :: HscEnv
+  -> [(Id, ByteString)]
+  -> IO [(Var, RemotePtr ())]
+allocateTopStrings hsc_env topStrings = do
+  let !(bndrs, strings) = unzip topStrings
+  ptrs <- iservCmd hsc_env $ MallocStrings strings
+  return $ zip bndrs ptrs
+
+{-
+Note [generating code for top-level string literal bindings]
+
+Here is a summary on how the byte code generator deals with top-level string
+literals:
+
+1. Top-level string literal bindings are spearted from the rest of the module.
+
+2. The strings are allocated via iservCmd, in allocateTopStrings
+
+3. The mapping from binders to allocated strings (topStrings) are maintained in
+   BcM and used when generating code for variable references.
+-}
 
 -- -----------------------------------------------------------------------------
 -- Generating byte code for an expression
@@ -136,8 +167,8 @@ coreExprToBCOs hsc_env this_mod expr
       -- the uniques are needed to generate fresh variables when we introduce new
       -- let bindings for ticked expressions
       us <- mkSplitUniqSupply 'y'
-      (BcM_State _dflags _us _this_mod _final_ctr mallocd _ _ , proto_bco)
-         <- runBc hsc_env us this_mod Nothing $
+      (BcM_State _dflags _us _this_mod _final_ctr mallocd _ _ _, proto_bco)
+         <- runBc hsc_env us this_mod Nothing emptyVarEnv $
               schemeTopBind (invented_id, simpleFreeVars expr)
 
       when (notNull mallocd)
@@ -321,7 +352,7 @@ collect (_, e) = go [] e
   where
     go xs e | Just e' <- bcView e = go xs e'
     go xs (AnnLam x (_,e))
-      | repTypeArgs (idType x) `lengthExceeds` 1
+      | typePrimRep (idType x) `lengthExceeds` 1
       = multiValException
       | otherwise
       = go (x:xs) e
@@ -551,8 +582,6 @@ schemeE d s p (AnnCase (_,scrut) _ _ []) = schemeE d s p scrut
 
 schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1, bind2], rhs)])
    | isUnboxedTupleCon dc -- handles pairs with one void argument (e.g. state token)
-   , [rep_ty1] <- repTypeArgs (idType bind1)
-   , [rep_ty2] <- repTypeArgs (idType bind2)
         -- Convert
         --      case .... of x { (# V'd-thing, a #) -> ... }
         -- to
@@ -561,23 +590,25 @@ schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1, bind2], rhs)])
         --
         -- Note that it does not matter losing the void-rep thing from the
         -- envt (it won't be bound now) because we never look such things up.
-   , Just res <- case () of
-                   _ | isVoidTy rep_ty1 && not (isVoidTy rep_ty2)
+   , Just res <- case (typePrimRep (idType bind1), typePrimRep (idType bind2)) of
+                   ([], [_])
                      -> Just $ doCase d s p scrut bind2 [(DEFAULT, [], rhs)] (Just bndr)
-                     | isVoidTy rep_ty2 && not (isVoidTy rep_ty1)
+                   ([_], [])
                      -> Just $ doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr)
-                     | otherwise
-                     -> Nothing
+                   _ -> Nothing
    = res
 
 schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1], rhs)])
    | isUnboxedTupleCon dc
-   , repTypeArgs (idType bndr) `lengthIs` 1 -- handles unit tuples
+   , length (typePrimRep (idType bndr)) <= 1 -- handles unit tuples
    = doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr)
 
 schemeE d s p (AnnCase scrut bndr _ alt@[(DEFAULT, [], _)])
    | isUnboxedTupleType (idType bndr)
-   , [ty] <- repTypeArgs (idType bndr)
+   , Just ty <- case typePrimRep (idType bndr) of
+       [_]  -> Just (unwrapType (idType bndr))
+       []   -> Just voidPrimTy
+       _    -> Nothing
        -- handles any pattern with a single non-void binder; in particular I/O
        -- monad returns (# RealWorld#, a #)
    = doCase d s p scrut (bndr `setIdType` ty) alt (Just bndr)
@@ -793,7 +824,7 @@ doCase  :: Word -> Sequel -> BCEnv
         -> Maybe Id  -- Just x <=> is an unboxed tuple case with scrut binder, don't enter the result
         -> BcM BCInstrList
 doCase d s p (_,scrut) bndr alts is_unboxed_tuple
-  | repTypeArgs (idType bndr) `lengthExceeds` 1
+  | typePrimRep (idType bndr) `lengthExceeds` 1
   = multiValException
   | otherwise
   = do
@@ -970,7 +1001,7 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
 
          pargs _ [] = return []
          pargs d (a:az)
-            = let [arg_ty] = repTypeArgs (exprType (deAnnotate' a))
+            = let arg_ty = unwrapType (exprType (deAnnotate' a))
 
               in case tyConAppTyCon_maybe arg_ty of
                     -- Don't push the FO; instead push the Addr# it
@@ -1195,24 +1226,22 @@ maybe_getCCallReturnRep :: Type -> Maybe PrimRep
 maybe_getCCallReturnRep fn_ty
    = let
        (_a_tys, r_ty) = splitFunTys (dropForAlls fn_ty)
-       r_reps = repTypeArgs r_ty
+       r_reps = typePrimRepArgs r_ty
 
        blargh :: a -- Used at more than one type
        blargh = pprPanic "maybe_getCCallReturn: can't handle:"
                          (pprType fn_ty)
      in
        case r_reps of
-         [] -> panic "empty repTypeArgs"
-         [ty]
-           | typePrimRep ty == PtrRep
-            -> blargh
-           | isVoidTy ty
-            -> Nothing
-           | otherwise
-            -> Just (typePrimRep ty)
+         []            -> panic "empty typePrimRepArgs"
+         [VoidRep]     -> Nothing
+         [rep]
+           | isGcPtrRep rep -> blargh
+           | otherwise      -> Just rep
+
                  -- if it was, it would be impossible to create a
                  -- valid return value placeholder on the stack
-         _  -> blargh
+         _             -> blargh
 
 maybe_is_tagToEnum_call :: AnnExpr' Id DVarSet -> Maybe (AnnExpr' Id DVarSet, [Name])
 -- Detect and extract relevant info for the tagToEnum kludge.
@@ -1224,7 +1253,7 @@ maybe_is_tagToEnum_call app
   = Nothing
   where
     extract_constr_Names ty
-           | [rep_ty] <- repTypeArgs ty
+           | rep_ty <- unwrapType ty
            , Just tyc <- tyConAppTyCon_maybe rep_ty
            , isDataTyCon tyc
            = map (getName . dataConWorkId) (tyConDataCons tyc)
@@ -1331,8 +1360,7 @@ pushAtom d p (AnnCase (_, a) _ _ []) -- trac #12128
    = pushAtom d p a
 
 pushAtom d p (AnnVar v)
-   | [rep_ty] <- repTypeArgs (idType v)
-   , V <- typeArgRep rep_ty
+   | [] <- typePrimRep (idType v)
    = return (nilOL, 0)
 
    | isFCallId v
@@ -1359,11 +1387,16 @@ pushAtom d p (AnnVar v)
          -- slots on to the top of the stack.
 
    | otherwise  -- v must be a global variable
-   = do dflags <- getDynFlags
-        let sz :: Word16
-            sz = fromIntegral (idSizeW dflags v)
-        MASSERT(sz == 1)
-        return (unitOL (PUSH_G (getName v)), sz)
+   = do topStrings <- getTopStrings
+        case lookupVarEnv topStrings v of
+            Just ptr -> pushAtom d p $ AnnLit $ MachWord $ fromIntegral $
+              ptrToWordPtr $ fromRemotePtr ptr
+            Nothing -> do
+                dflags <- getDynFlags
+                let sz :: Word16
+                    sz = fromIntegral (idSizeW dflags v)
+                MASSERT(sz == 1)
+                return (unitOL (PUSH_G (getName v)), sz)
 
 
 pushAtom _ _ (AnnLit lit) = do
@@ -1542,7 +1575,11 @@ bcIdArgRep :: Id -> ArgRep
 bcIdArgRep = toArgRep . bcIdPrimRep
 
 bcIdPrimRep :: Id -> PrimRep
-bcIdPrimRep = typePrimRep . bcIdUnaryType
+bcIdPrimRep id
+  | [rep] <- typePrimRepArgs (idType id)
+  = rep
+  | otherwise
+  = pprPanic "bcIdPrimRep" (ppr id <+> dcolon <+> ppr (idType id))
 
 isFollowableArg :: ArgRep -> Bool
 isFollowableArg P = True
@@ -1551,11 +1588,6 @@ isFollowableArg _ = False
 isVoidArg :: ArgRep -> Bool
 isVoidArg V = True
 isVoidArg _ = False
-
-bcIdUnaryType :: Id -> UnaryType
-bcIdUnaryType x = case repTypeArgs (idType x) of
-    [rep_ty] -> rep_ty
-    _ -> pprPanic "bcIdUnaryType" (ppr x $$ ppr (idType x))
 
 -- See bug #1257
 multiValException :: a
@@ -1625,12 +1657,12 @@ isVAtom _                     = False
 atomPrimRep :: AnnExpr' Id ann -> PrimRep
 atomPrimRep e | Just e' <- bcView e = atomPrimRep e'
 atomPrimRep (AnnVar v)              = bcIdPrimRep v
-atomPrimRep (AnnLit l)              = typePrimRep (literalType l)
+atomPrimRep (AnnLit l)              = typePrimRep1 (literalType l)
 
 -- Trac #12128:
 -- A case expresssion can be an atom because empty cases evaluate to bottom.
 -- See Note [Empty case alternatives] in coreSyn/CoreSyn.hs
-atomPrimRep (AnnCase _ _ ty _)      = ASSERT(typePrimRep ty == PtrRep) PtrRep
+atomPrimRep (AnnCase _ _ ty _)      = ASSERT(typePrimRep ty == [LiftedRep]) LiftedRep
 atomPrimRep (AnnCoercion {})        = VoidRep
 atomPrimRep other = pprPanic "atomPrimRep" (ppr (deAnnotate' other))
 
@@ -1648,7 +1680,7 @@ mkStackOffsets original_depth szsw
    = map (subtract 1) (tail (scanl (+) original_depth szsw))
 
 typeArgRep :: Type -> ArgRep
-typeArgRep = toArgRep . typePrimRep
+typeArgRep = toArgRep . typePrimRep1
 
 -- -----------------------------------------------------------------------------
 -- The bytecode generator's monad
@@ -1663,6 +1695,8 @@ data BcM_State
                                          -- Should be free()d when it is GCd
         , modBreaks   :: Maybe ModBreaks -- info about breakpoints
         , breakInfo   :: IntMap CgBreakInfo
+        , topStrings  :: IdEnv (RemotePtr ()) -- top-level string literals
+          -- See Note [generating code for top-level string literal bindings].
         }
 
 newtype BcM r = BcM (BcM_State -> IO (BcM_State, r))
@@ -1672,10 +1706,12 @@ ioToBc io = BcM $ \st -> do
   x <- io
   return (st, x)
 
-runBc :: HscEnv -> UniqSupply -> Module -> Maybe ModBreaks -> BcM r
+runBc :: HscEnv -> UniqSupply -> Module -> Maybe ModBreaks
+      -> IdEnv (RemotePtr ())
+      -> BcM r
       -> IO (BcM_State, r)
-runBc hsc_env us this_mod modBreaks (BcM m)
-   = m (BcM_State hsc_env us this_mod 0 [] modBreaks IntMap.empty)
+runBc hsc_env us this_mod modBreaks topStrings (BcM m)
+   = m (BcM_State hsc_env us this_mod 0 [] modBreaks IntMap.empty topStrings)
 
 thenBc :: BcM a -> (a -> BcM b) -> BcM b
 thenBc (BcM expr) cont = BcM $ \st0 -> do
@@ -1749,6 +1785,9 @@ newUnique = BcM $
 
 getCurrentModule :: BcM Module
 getCurrentModule = BcM $ \st -> return (st, thisModule st)
+
+getTopStrings :: BcM (IdEnv (RemotePtr ()))
+getTopStrings = BcM $ \st -> return (st, topStrings st)
 
 newId :: Type -> BcM Id
 newId ty = do
