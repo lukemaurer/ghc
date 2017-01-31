@@ -972,23 +972,49 @@ etaInfoApp subst e eis
     go e (EtaCo co    : eis) = go (Cast e co) eis
 
 --------------
+-- | Apply the eta info to a local binding. Mostly delegates to
+-- `etaInfoAppLocalBndr` and `etaInfoAppRhs`.
 etaInfoAppBind :: Subst -> CoreBind -> [EtaInfo] -> (Subst, CoreBind)
 etaInfoAppBind subst (NonRec bndr rhs) eis
   = (subst', NonRec bndr' rhs')
   where
     bndr_w_new_type = etaInfoAppLocalBndr bndr eis
-    (subst', bndr') = substBndr subst bndr_w_new_type
-    rhs'            = etaInfoAppRhs subst bndr' rhs eis
+    (subst', bndr1) = substBndr subst bndr_w_new_type
+    rhs'            = etaInfoAppRhs subst bndr1 rhs eis
+    bndr'           | isJoinId bndr = bndr1 `setIdArity` manifestArity rhs'
+                                        -- Arity may have changed
+                                        -- (see etaInfoAppRhs example)
+                    | otherwise     = bndr1
 etaInfoAppBind subst (Rec pairs) eis
   = (subst', Rec (bndrs' `zip` rhss'))
   where
     (bndrs, rhss)     = unzip pairs
     bndrs_w_new_types = map (\bndr -> etaInfoAppLocalBndr bndr eis) bndrs
-    (subst', bndrs')  = substRecBndrs subst bndrs_w_new_types
-    rhss'             = zipWith process bndrs' rhss
+    (subst', bndrs1)  = substRecBndrs subst bndrs_w_new_types
+    rhss'             = zipWith process bndrs1 rhss
     process bndr' rhs = etaInfoAppRhs subst' bndr' rhs eis
+    bndrs'            | isJoinId (head bndrs)
+                      = [ bndr1 `setIdArity` manifestArity rhs'
+                        | (bndr1, rhs') <- bndrs1 `zip` rhss' ]
+                          -- Arities may have changed
+                          -- (see etaInfoAppRhs example)
+                      | otherwise
+                      = bndrs1
 
 --------------
+-- | Apply the eta info to a binder's RHS. Only interesting for a join point,
+-- where we might have this:
+--   join j :: a -> [a] -> [a]
+--        j x = \xs -> x : xs in jump j z
+-- Eta-expanding produces this:
+--   \ys -> (join j :: a -> [a] -> [a]
+--                j x = \xs -> x : xs in jump j z) ys
+-- Now when we push the application to ys inward (see Note [No crap in
+-- eta-expanded code]), it goes to the body of the RHS of the join point (after
+-- the lambda x!):
+--   \ys -> join j :: a -> [a]
+--               j x = x : ys in jump j z
+-- Note that the type and arity of j have both changed.
 etaInfoAppRhs :: Subst -> CoreBndr -> CoreExpr -> [EtaInfo] -> CoreExpr
 etaInfoAppRhs subst bndr expr eis
   | Just arity <- isJoinId_maybe bndr
@@ -1005,8 +1031,9 @@ etaInfoAppRhs subst bndr expr eis
 
 --------------
 -- | Apply the eta info to a local binder. A join point will have the EtaInfos
--- applied to its RHS, so its type may change. See Note [No crap in
--- eta-expanded code] for why all this is necessary.
+-- applied to its RHS, so its type may change. See comment on etaInfoAppRhs for
+-- an example. See Note [No crap in eta-expanded code] for why all this is
+-- necessary.
 etaInfoAppLocalBndr :: CoreBndr -> [EtaInfo] -> CoreBndr
 etaInfoAppLocalBndr bndr orig_eis
   = case isJoinId_maybe bndr of

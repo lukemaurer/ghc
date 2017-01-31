@@ -554,7 +554,6 @@ cpeJoinPair :: CorePrepEnv -> JoinId -> CoreExpr
 cpeJoinPair env bndr rhs
   = do { let Just join_arity = isJoinId_maybe bndr
              (bndrs, body)   = collectNBinders join_arity rhs
-                                 -- See Note [Arity and join points]
 
        ; (env', bndrs') <- cpCloneBndrs env bndrs
 
@@ -563,6 +562,8 @@ cpeJoinPair env bndr rhs
 
        ; let rhs'  = mkCoreLams bndrs' body'
              bndr' = bndr `setIdUnfolding` evaldUnfolding
+                          `setIdArity` count isId bndrs
+                            -- See Note [Arity and join points]
 
        ; return (bndr', rhs') }
 
@@ -570,15 +571,18 @@ cpeJoinPair env bndr rhs
 Note [Arity and join points]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A join point has a fixed arity, equal to its join arity (see Note [Join points])
-but not counting type arguments. Since we want everything to have exactly the
-right arity, we must let-bind the body of the RHS if it returns a lambda:
+Up to now, we've allowed a join point to have an arity greater than its join
+arity (minus type arguments), since this is what's useful for eta expansion.
+However, for code gen purposes, its arity must be exactly the number of value
+arguments it will be called with, and it must have exactly that many value
+lambdas. Hence if there are extra lambdas we must let-bind the body of the RHS:
 
   join j x y z = \w -> ... in ...
     =>
   join j x y z = (let f = \w -> ... in f) in ...
 
-This is similar to Note [Silly extra arguments].
+This is also what happens with Note [Silly extra arguments]. Note that it's okay
+for us to mess with the arity because a join point is never exported.
 -}
 
 -- ---------------------------------------------------------------------------
