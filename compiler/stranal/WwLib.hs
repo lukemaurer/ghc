@@ -436,6 +436,7 @@ mkWWargs subst fun_ty demands
   = WARN( True, ppr fun_ty )                    -- Should not happen: if there is a demand
     return ([], id, id, substTy subst fun_ty)   -- then there should be a function arrow
   where
+    -- See Note [Join points and beta-redexes]
     apply_or_bind_then k arg (Lam bndr body)
       = mkCoreLet (NonRec bndr arg) (k body)    -- Important that arg is fresh!
     apply_or_bind_then k arg fun

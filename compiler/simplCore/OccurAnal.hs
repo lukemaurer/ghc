@@ -2547,7 +2547,7 @@ tagRecBinders :: TopLevelFlag           -- At top level?
                                         -- with binders removed
                   [IdWithOccInfo])      -- Tagged binders
 -- Substantially more complicated than non-recursive case. Need to adjust RHS
--- details *before* tagging binders (because the tags depend of the RHSes).
+-- details *before* tagging binders (because the tags depend on the RHSes).
 tagRecBinders lvl body_uds triples
  = let
      (bndrs, rhs_udss, _) = unzip3 triples
@@ -2640,6 +2640,7 @@ decideJoinPointHood NotTopLevel usage bndrs
     ok_rule _ BuiltinRule{} = False -- only possible with plugin shenanigans
     ok_rule join_arity (Rule { ru_args = args })
       = length args == join_arity
+        -- Invariant 1 as applied to LHSes of rules
 
 willBeJoinId_maybe :: CoreBndr -> Maybe JoinArity
 willBeJoinId_maybe bndr

@@ -552,7 +552,8 @@ cpeJoinPair :: CorePrepEnv -> JoinId -> CoreExpr
             -> UniqSM (JoinId, CpeRhs)
 -- Used for all join bindings
 cpeJoinPair env bndr rhs
-  = do { let Just join_arity = isJoinId_maybe bndr
+  = ASSERT(isJoinId bndr)
+    do { let Just join_arity = isJoinId_maybe bndr
              (bndrs, body)   = collectNBinders join_arity rhs
 
        ; (env', bndrs') <- cpCloneBndrs env bndrs

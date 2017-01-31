@@ -524,7 +524,8 @@ Join points must follow these invariants:
   2. For join arity n, the right-hand side must begin with at least n lambdas.
   3. If the binding is recursive, then all other bindings in the recursive group
      must also be join points.
-  4. The binding's type must not be polymorphic in its return type.
+  4. The binding's type must not be polymorphic in its return type (as defined
+     in Note [The polymorphism rule of join points]).
 
 Examples:
 
@@ -533,7 +534,7 @@ Examples:
                           then jump j1 a
                           else jump j1 a b -- Fails 1: inconsistent calls
   join j2  x = flip (+) x in j2 1 2        -- Fails 2: not enough lambdas
-  join j2' x = \y -> x + y in j3 1         -- Passes: extra lams ok for non-rec
+  join j2' x = \y -> x + y in j3 1         -- Passes: extra lams ok
   join j @a (x :: a) = x                   -- Fails 4: polymorphic in ret type
 
 Invariant 1 applies to left-hand sides of rewrite rules, so a rule for a join

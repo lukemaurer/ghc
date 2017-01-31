@@ -713,6 +713,10 @@ jumpSize
  -> Int  -- ^ number of value args that are void
  -> Int
 jumpSize n_val_args voids = 2 * (1 + n_val_args - voids)
+  -- A jump is 20% the size of a function call. Making jumps free reopens
+  -- bug #6048, but making them any more expensive loses a 21% improvement in
+  -- spectral/puzzle. TODO Perhaps adjusting the default threshold would be a
+  -- better solution?
 
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> ExprSize
 -- Size for functions that are not constructors or primops
