@@ -71,7 +71,7 @@ module BasicTypes(
         InsideLam, insideLam, notInsideLam,
         OneBranch, oneBranch, notOneBranch,
         InterestingCxt,
-        TailCallInfo(..), tailCallInfo,
+        TailCallInfo(..), tailCallInfo, zapOccTailCallInfo,
         isAlwaysTailCalled, isAlwaysTailCalled_maybe,
 
         EP(..),
@@ -890,6 +890,10 @@ data TailCallInfo = AlwaysTailCalled JoinArity -- See Note [TailCallInfo]
 tailCallInfo :: OccInfo -> TailCallInfo
 tailCallInfo IAmDead   = NoTailCallInfo
 tailCallInfo other     = occ_tail other
+
+zapOccTailCallInfo :: OccInfo -> OccInfo
+zapOccTailCallInfo IAmDead   = IAmDead
+zapOccTailCallInfo occ       = occ { occ_tail = NoTailCallInfo }
 
 isAlwaysTailCalled :: OccInfo -> Bool
 isAlwaysTailCalled occ

@@ -897,11 +897,12 @@ transferPolyIdInfo old_id abstract_wrt new_id
     old_inline_prag = inlinePragInfo old_info
     old_occ_info    = occInfo old_info
     new_arity       = old_arity + arity_increase
+    new_occ_info    = zapOccTailCallInfo old_occ_info
 
     old_strictness  = strictnessInfo old_info
     new_strictness  = increaseStrictSigArity arity_increase old_strictness
 
     transfer new_info = new_info `setArityInfo` new_arity
                                  `setInlinePragInfo` old_inline_prag
-                                 `setOccInfo` old_occ_info
+                                 `setOccInfo` new_occ_info
                                  `setStrictnessInfo` new_strictness
