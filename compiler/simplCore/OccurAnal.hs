@@ -2593,7 +2593,7 @@ tagRecBinders lvl body_uds triples
 setBinderOcc :: OccInfo -> CoreBndr -> CoreBndr
 setBinderOcc occ_info bndr
   | isTyVar bndr      = bndr
-  | isExportedId bndr = if isNoOcc (idOccInfo bndr)
+  | isExportedId bndr = if isManyOccs (idOccInfo bndr)
                           then bndr
                           else setIdOccInfo bndr noOccInfo
             -- Don't use local usage info for visible-elsewhere things

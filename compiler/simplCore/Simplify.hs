@@ -207,23 +207,23 @@ expansion at a let RHS can concentrate solely on the PAP case.
 
 Case-of-case and join points
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 When we perform the case-of-case transform (or otherwise push continuations
 inward), we want to treat join points specially. Since they're always
-tail-called and we want to maintain this invariant, we can do this:
+tail-called and we want to maintain this invariant, we can do this (for any
+evaluation context E):
 
-  E[let <join> j = e
+  E[join j = e
     in case ... of
-         A -> j 1
-         B -> j 2
+         A -> jump j 1
+         B -> jump j 2
          C -> f 3]
 
     -->
 
-  let <join> j = E[e]
+  join j = E[e]
   in case ... of
-       A -> j 1
-       B -> j 2
+       A -> jump j 1
+       B -> jump j 2
        C -> E[f 3]
 
 As is evident from the example, there are two components to this behavior:

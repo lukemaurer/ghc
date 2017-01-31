@@ -65,14 +65,14 @@ module BasicTypes(
         bestOneShot, worstOneShot,
 
         OccInfo(..), noOccInfo, seqOccInfo, zapFragileOcc, isOneOcc,
-        isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isNoOcc,
+        isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isManyOccs,
         strongLoopBreaker, weakLoopBreaker,
 
         InsideLam, insideLam, notInsideLam,
         OneBranch, oneBranch, notOneBranch,
         InterestingCxt,
         TailCallInfo(..), tailCallInfo, zapOccTailCallInfo,
-        isAlwaysTailCalled, isAlwaysTailCalled_maybe,
+        isAlwaysTailCalled,
 
         EP(..),
 
@@ -853,9 +853,9 @@ See OccurAnal Note [Weak loop breakers]
 noOccInfo :: OccInfo
 noOccInfo = ManyOccs { occ_tail = NoTailCallInfo }
 
-isNoOcc :: OccInfo -> Bool
-isNoOcc ManyOccs{} = True
-isNoOcc _          = False
+isManyOccs :: OccInfo -> Bool
+isManyOccs ManyOccs{} = True
+isManyOccs _          = False
 
 seqOccInfo :: OccInfo -> ()
 seqOccInfo occ = occ `seq` ()
@@ -900,11 +900,6 @@ isAlwaysTailCalled occ
   = case tailCallInfo occ of AlwaysTailCalled{} -> True
                              NoTailCallInfo     -> False
 
-isAlwaysTailCalled_maybe :: OccInfo -> Maybe JoinArity
-isAlwaysTailCalled_maybe occ
-  = case tailCallInfo occ of AlwaysTailCalled join_arity -> Just join_arity
-                             NoTailCallInfo              -> Nothing
-
 instance Outputable TailCallInfo where
   ppr (AlwaysTailCalled ar) = sep [ text "Tail", int ar ]
   ppr _                     = empty
@@ -932,6 +927,7 @@ isOneOcc (OneOcc {}) = True
 isOneOcc _           = False
 
 zapFragileOcc :: OccInfo -> OccInfo
+-- Keep only the most robust data: deadness, loop-breaker-hood
 zapFragileOcc (OneOcc {}) = noOccInfo
 zapFragileOcc occ         = zapOccTailCallInfo occ
 

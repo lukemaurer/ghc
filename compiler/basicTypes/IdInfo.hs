@@ -55,7 +55,7 @@ module IdInfo (
         insideLam, notInsideLam, oneBranch, notOneBranch,
 
         TailCallInfo(..),
-        tailCallInfo, isAlwaysTailCalled, isAlwaysTailCalled_maybe,
+        tailCallInfo, isAlwaysTailCalled,
 
         -- ** The RuleInfo type
         RuleInfo(..),
