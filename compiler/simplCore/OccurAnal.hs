@@ -2615,9 +2615,8 @@ decideJoinPointHood TopLevel _ _
   = False
 decideJoinPointHood NotTopLevel usage bndrs
   | isJoinId (head bndrs)
-  = ASSERT(all_ok) -- Make sure everything's consistent. In theory, this
-                   -- analysis could be conservative w/r/t what Core Lint would
-                   -- accept, but currently we don't expect it to be.
+  = WARN(not all_ok, text "OccurAnal failed to rediscover join point(s):" <+>
+                       ppr bndrs)
     all_ok
   | otherwise
   = all_ok
