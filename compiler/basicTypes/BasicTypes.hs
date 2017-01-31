@@ -933,8 +933,7 @@ isOneOcc _           = False
 
 zapFragileOcc :: OccInfo -> OccInfo
 zapFragileOcc (OneOcc {}) = noOccInfo
-zapFragileOcc IAmDead     = IAmDead
-zapFragileOcc occ         = occ { occ_tail = NoTailCallInfo }
+zapFragileOcc occ         = zapOccTailCallInfo occ
 
 instance Outputable OccInfo where
   -- only used for debugging; never parsed.  KSW 1999-07

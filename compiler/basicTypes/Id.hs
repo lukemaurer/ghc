@@ -52,7 +52,7 @@ module Id (
         globaliseId, localiseId,
         setIdInfo, lazySetIdInfo, modifyIdInfo, maybeModifyIdInfo,
         zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapIdUsageEnvInfo,
-        zapIdUsedOnceInfo,
+        zapIdUsedOnceInfo, zapIdTailCallInfo,
         zapFragileIdInfo, zapIdStrictness,
         transferPolyIdInfo,
 
@@ -574,12 +574,14 @@ asJoinId id arity = WARN(not (isLocalId id),
 
 zapJoinId :: Id -> Id
 -- May be a regular id already
-zapJoinId jid | isJoinId jid = jid `setIdDetails` VanillaId
+zapJoinId jid | isJoinId jid = zapIdTailCallInfo (jid `setIdDetails` VanillaId)
+                                 -- Core Lint may complain if still marked
+                                 -- as AlwaysTailCalled
               | otherwise    = jid
 
 asJoinId_maybe :: Id -> Maybe JoinArity -> Id
 asJoinId_maybe id (Just arity) = asJoinId id arity
-asJoinId_maybe id Nothing      = id
+asJoinId_maybe id Nothing      = zapJoinId id
 
 {-
 ************************************************************************
@@ -831,6 +833,9 @@ zapIdUsageEnvInfo = zapInfo zapUsageEnvInfo
 
 zapIdUsedOnceInfo :: Id -> Id
 zapIdUsedOnceInfo = zapInfo zapUsedOnceInfo
+
+zapIdTailCallInfo :: Id -> Id
+zapIdTailCallInfo = zapInfo zapTailCallInfo
 
 {-
 Note [transferPolyIdInfo]

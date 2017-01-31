@@ -1020,27 +1020,32 @@ simple_opt_bind' subst (Rec prs)
   = (subst'', res_bind)
   where
     res_bind            = Just (Rec (reverse rev_prs'))
-    (subst', bndrs')    = subst_opt_bndrs subst (map fst prs)
-    (subst'', rev_prs') = foldl do_pr (subst', []) (prs `zip` bndrs')
+    prs'                = map (uncurry convert_if_marked) prs
+    (subst', bndrs')    = subst_opt_bndrs subst (map fst prs')
+    (subst'', rev_prs') = foldl do_pr (subst', []) (prs' `zip` bndrs')
     do_pr (subst, prs) ((b,r), b')
        = case maybe_substitute subst b r2 of
            Just subst' -> (subst', prs)
            Nothing     -> (subst,  (b2,r2):prs)
        where
-         (b1, r1) | AlwaysTailCalled ar <- tailCallInfo (idOccInfo b')
-                    -- Marked to become a join point
-                  , (bndrs, body) <- etaExpandToJoinPoint ar r
-                  = -- Tail call info now unnecessary
-                    (maybeModifyIdInfo (zapTailCallInfo (idInfo b')) $
-                       b' `asJoinId` ar,
-                     mkLams bndrs body)
-                  | otherwise
-                  = (b', r)
-         b2 = add_info subst b b1
-         r2 = simple_opt_expr subst r1
+         b2 = add_info subst b b'
+         r2 = simple_opt_expr subst r
 
 simple_opt_bind' subst (NonRec b r)
-  = simple_opt_out_bind subst (b, simple_opt_expr subst r)
+  = simple_opt_out_bind subst (b', simple_opt_expr subst r')
+  where
+    (b', r') = convert_if_marked b r
+
+convert_if_marked :: InVar -> InExpr -> (InVar, InExpr)
+convert_if_marked bndr rhs
+  | isId bndr
+  , AlwaysTailCalled ar <- tailCallInfo (idOccInfo bndr)
+    -- Marked to become a join point
+  , (bndrs, body) <- etaExpandToJoinPoint ar rhs
+  = -- Tail call info now unnecessary
+    (zapIdTailCallInfo (bndr `asJoinId` ar), mkLams bndrs body)
+  | otherwise
+  = (bndr, rhs)
 
 ----------------------
 simple_opt_out_bind :: Subst -> (InVar, OutExpr) -> (Subst, Maybe CoreBind)

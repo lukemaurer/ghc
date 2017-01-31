@@ -1518,12 +1518,11 @@ matchOrConvertToJoinPoint bndr rhs
   | not (isId bndr)
   = Nothing
   | isJoinId bndr
-  = Just (bndr, rhs)
+  = -- No point in keeping tailCallInfo around; very fragile
+    Just (zapIdTailCallInfo bndr, rhs)
   | AlwaysTailCalled join_arity <- tailCallInfo (idOccInfo bndr)
   , (bndrs, body) <- etaExpandToJoinPoint join_arity rhs
-  = -- No point in keeping tailCallInfo around; very fragile
-    Just (maybeModifyIdInfo (zapTailCallInfo (idInfo bndr)) $
-            bndr `asJoinId` join_arity,
+  = Just (zapIdTailCallInfo (bndr `asJoinId` join_arity),
           mkLams bndrs body)
   | otherwise
   = Nothing
