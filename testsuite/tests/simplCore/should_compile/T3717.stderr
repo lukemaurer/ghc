@@ -3,7 +3,7 @@
 Result size of Tidy Core
   = {terms: 36, types: 15, coercions: 0, joins: 0/0}
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T3717.$trModule4 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,
@@ -20,7 +20,7 @@ T3717.$trModule3 :: GHC.Types.TrName
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 20}]
 T3717.$trModule3 = GHC.Types.TrNameS T3717.$trModule4
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T3717.$trModule2 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,

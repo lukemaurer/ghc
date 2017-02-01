@@ -122,7 +122,7 @@ T13155:
 T13156:
 	$(RM) -f T13156.hi T13156.o
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c T13156.hs -O -ddump-prep -dsuppress-uniques | grep "case"
-        # There should be a single 'case case'
+        # There should be a single 'case r @ GHC.Types.Any'
 
 .PHONY: T4138
 T4138:

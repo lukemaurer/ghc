@@ -35,7 +35,7 @@ T3772.$trModule2 :: GHC.Prim.Addr#
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 30 0}]
 T3772.$trModule2 = "T3772"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T3772.$trModule1 :: GHC.Types.TrName
 [GblId,
  Caf=NoCafRefs,
@@ -44,7 +44,7 @@ T3772.$trModule1 :: GHC.Types.TrName
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 20}]
 T3772.$trModule1 = GHC.Types.TrNameS T3772.$trModule2
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T3772.$trModule4 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,

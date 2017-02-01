@@ -13,12 +13,12 @@ $trModule2 :: TrName
 [GblId, Caf=NoCafRefs]
 $trModule2 = GHC.Types.TrNameS $trModule1
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $trModule3 :: Addr#
 [GblId, Caf=NoCafRefs]
 $trModule3 = "T9400"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 $trModule4 :: TrName
 [GblId, Caf=NoCafRefs]
 $trModule4 = GHC.Types.TrNameS $trModule3

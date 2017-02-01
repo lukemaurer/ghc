@@ -26,12 +26,12 @@ $trModule2 :: GHC.Types.TrName
 [GblId, Caf=NoCafRefs]
 $trModule2 = GHC.Types.TrNameS $trModule1
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $trModule3 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $trModule3 = "Roles13"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 $trModule4 :: GHC.Types.TrName
 [GblId, Caf=NoCafRefs]
 $trModule4 = GHC.Types.TrNameS $trModule3
@@ -41,7 +41,7 @@ Roles13.$trModule :: GHC.Types.Module
 [GblId, Caf=NoCafRefs]
 Roles13.$trModule = GHC.Types.Module $trModule2 $trModule4
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tc'MkAge1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tc'MkAge1 = "'MkAge"#
@@ -61,7 +61,7 @@ Roles13.$tc'MkAge =
     Roles13.$trModule
     $tc'MkAge2
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tcAge1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tcAge1 = "Age"#
@@ -81,7 +81,7 @@ Roles13.$tcAge =
     Roles13.$trModule
     $tcAge2
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tc'MkWrap1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tc'MkWrap1 = "'MkWrap"#
@@ -101,7 +101,7 @@ Roles13.$tc'MkWrap =
     Roles13.$trModule
     $tc'MkWrap2
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tcWrap1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tcWrap1 = "Wrap"#

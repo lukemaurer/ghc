@@ -32,12 +32,12 @@ $trModule2 :: GHC.Types.TrName
 [GblId, Caf=NoCafRefs]
 $trModule2 = GHC.Types.TrNameS $trModule1
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $trModule3 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $trModule3 = "T2431"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 $trModule4 :: GHC.Types.TrName
 [GblId, Caf=NoCafRefs]
 $trModule4 = GHC.Types.TrNameS $trModule3
@@ -47,7 +47,7 @@ T2431.$trModule :: GHC.Types.Module
 [GblId, Caf=NoCafRefs]
 T2431.$trModule = GHC.Types.Module $trModule2 $trModule4
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tc'Refl1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tc'Refl1 = "'Refl"#
@@ -67,7 +67,7 @@ T2431.$tc'Refl =
     T2431.$trModule
     $tc'Refl2
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 $tc:~:1 :: GHC.Prim.Addr#
 [GblId, Caf=NoCafRefs]
 $tc:~:1 = ":~:"#

@@ -75,7 +75,7 @@ T7360.$trModule4 :: GHC.Prim.Addr#
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 20 0}]
 T7360.$trModule4 = "main"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T7360.$trModule3 :: GHC.Types.TrName
 [GblId,
  Caf=NoCafRefs,
@@ -84,7 +84,7 @@ T7360.$trModule3 :: GHC.Types.TrName
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 10 20}]
 T7360.$trModule3 = GHC.Types.TrNameS T7360.$trModule4
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T7360.$trModule2 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,
@@ -111,7 +111,7 @@ T7360.$trModule :: GHC.Types.Module
 T7360.$trModule =
   GHC.Types.Module T7360.$trModule3 T7360.$trModule1
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T7360.$tc'Foo9 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,
@@ -142,7 +142,7 @@ T7360.$tc'Foo3 =
     T7360.$trModule
     T7360.$tc'Foo8
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T7360.$tc'Foo7 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,
@@ -173,7 +173,7 @@ T7360.$tc'Foo2 =
     T7360.$trModule
     T7360.$tc'Foo6
 
--- RHS size: {terms: 1, types: 0, coercions: 0}
+-- RHS size: {terms: 1, types: 0, coercions: 0, joins: 0/0}
 T7360.$tc'Foo5 :: GHC.Prim.Addr#
 [GblId,
  Caf=NoCafRefs,
@@ -212,7 +212,7 @@ T7360.$tcFoo2 :: GHC.Prim.Addr#
          WorkFree=True, Expandable=True, Guidance=IF_ARGS [] 20 0}]
 T7360.$tcFoo2 = "Foo"#
 
--- RHS size: {terms: 2, types: 0, coercions: 0}
+-- RHS size: {terms: 2, types: 0, coercions: 0, joins: 0/0}
 T7360.$tcFoo1 :: GHC.Types.TrName
 [GblId,
  Caf=NoCafRefs,
