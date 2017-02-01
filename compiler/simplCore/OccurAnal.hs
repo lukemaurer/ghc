@@ -740,6 +740,18 @@ a right-hand side. In particular, we need to
      lambda, or a non-recursive join point; and
   b) call 'markAllNonTailCalled' *unless* the binding is for a join point.
 
+Some examples, with how the free occurrences in e (assumed not to be a value
+lambda) get marked:
+
+                             inside lam    non-tail-called
+  ------------------------------------------------------------
+  let x = e                  No            Yes
+  let f = \x -> e            Yes           Yes
+  let f = \x{OneShot} -> e   No            Yes
+  \x -> e                    Yes           Yes
+  join j x = e               No            No
+  joinrec j x = e            Yes           No
+
 There are a few other caveats; most importantly, if we're marking a binding as
 'AlwaysTailCalled', it's *going* to be a join point, so we treat it as one so
 that the effect cascades properly. Consequently, at the time the RHS is
@@ -750,9 +762,11 @@ join-point-hood has been decided.
 Thus the overall sequence taking place in 'occAnalNonRecBind' and
 'occAnalRecBind' is as follows:
 
-  1. Call 'occAnalLam' to find usage information for the RHS.
-  2. Decide whether to make the binding(s) a join point(s).
-  3. Call 'adjustRhsUsage' accordingly.
+  1. Call 'occAnalLamOrRhs' to find usage information for the RHS.
+  2. Call 'tagNonRecBinder' or 'tagRecBinders', which decides whether to make
+     the binding a join point.
+  3. Call 'adjustRhsUsage' accordingly. (Done as part of 'tagRecBinders' when
+     recursive.)
 
 (In the recursive case, this logic is spread between 'makeNode' and
 'occAnalRec'.)

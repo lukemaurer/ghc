@@ -1515,7 +1515,10 @@ simplRecE env pairs body cont
         ; env2 <- simplRecBind env1 NotTopLevel (Just cont) pairs
         ; simplExprF env2 body cont }
 
-matchOrConvertToJoinPoint :: InBndr -> InExpr -> Maybe (InBndr, InExpr)
+-- | Perform the conversion of a value binding to a join point if it's marked
+-- as 'AlwaysTailCalled'. If it's already a join point, return it as is.
+-- Otherwise return 'Nothing'.
+matchOrConvertToJoinPoint :: InBndr -> InExpr -> Maybe (JoinId, InExpr)
 matchOrConvertToJoinPoint bndr rhs
   | not (isId bndr)
   = Nothing

@@ -805,11 +805,12 @@ isPAP env _               = False
 -}
 
 -- ---------------------------------------------------------------------------
--- A little monad for this let-no-escaping pass
+-- A monad for the core-to-STG pass
 -- ---------------------------------------------------------------------------
 
--- There's a lot of stuff to pass around, so we use this CtsM monad to
--- help.  All the stuff here is only passed *down*.
+-- There's a lot of stuff to pass around, so we use this CtsM
+-- ("core-to-STG monad") monad to help.  All the stuff here is only passed
+-- *down*.
 
 newtype CtsM a = CtsM
     { unCtsM :: IdEnv HowBound
