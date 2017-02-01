@@ -937,8 +937,9 @@ test('T13035',
 test('T13056',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-         [(wordsize(64), 520166912, 5),
+         [(wordsize(64), 546800240, 5),
          # 2017-01-06    520166912 initial
+         # 2017-01-31    546800240 Join points (#12988)
          ]),
      ],
      compile,
